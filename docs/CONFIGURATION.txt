@@ -1,0 +1,159 @@
+────────────────────────────────────────────
+CONFIGURATION.txt
+────────────────────────────────────────────
+Configuration Reference (Schema-Driven)
+This document defines the schema-driven benchmark configuration format as consumed by the benchmark pipeline.
+Configurations are:
+	• validated against internal schemas
+	• parsed deterministically
+	• interpreted backend-aware
+Unknown keys are ignored unless explicitly validated by the corresponding backend.
+All examples use YAML for readability.
+
+Top-Level Structure
+model # Required
+input # Required
+device # Required
+run # Required
+metrics # Optional (defaults applied)
+output # Optional (defaults applied)
+
+model
+Defines the model artifact and backend to be benchmarked.
+model:
+backend: torch | onnx | openvino | tensorrt
+path: /path/to/model.(pt|onnx|xml)
+Key:
+	• backend (string, required)
+Selects the runner implementation.
+	• path (string, required)
+Path to a serialized model artifact.
+No model construction happens at runtime.
+Semantics:
+	• The pipeline never instantiates model architectures.
+	• Only pre-exported artifacts are allowed (security & reproducibility).
+	• The backend determines how the artifact is loaded and executed.
+
+input
+Describes the dummy/input tensor used for inference.
+input:
+shape: [1, 1, 360]
+dtype: float32
+batch: 1
+Key:
+	• shape (list[int], required)
+Full tensor shape excluding batch if batch is specified.
+	• dtype (string, required)
+Typically float32.
+	• batch (int, optional, default = 1)
+Overrides the batch dimension if supported.
+Semantics:
+	• The input must match the model’s forward signature.
+	• Shape mismatches fail fast during warmup.
+	• Batch handling is backend-dependent (Torch vs. ONNX vs. OpenVINO).
+
+device
+Selects the execution target or execution policy.
+device:
+target: cpu | cuda:0 | GPU | NPU | AUTO | HETERO:GPU,CPU
+allow_fallback: true
+Key:
+	• target (string, required)
+Device or execution policy string.
+	• allow_fallback (bool, optional, default = false)
+Whether to fall back if the preferred device is unavailable.
+Semantics:
+	• Device strings are sanitized before being used in paths.
+	• Backend-specific interpretation:
+		○ Torch: cpu, cuda:0, …
+		○ ONNX Runtime: provider chain resolution
+		○ OpenVINO: CPU, GPU, NPU, AUTO, HETERO:*
+
+run
+Controls warmup and measurement iterations.
+run:
+warmups: 5
+repeats: 50
+threads: 8
+Key:
+	• warmups (int, required)
+Warmup iterations (excluded from metrics).
+	• repeats (int, required)
+Measured inference iterations.
+	• threads (int, optional)
+CPU thread count (backend-dependent).
+Semantics:
+	• Warmups mitigate cold-start and JIT effects.
+	• Only repeats contribute to latency statistics.
+	• Threading is advisory and backend-dependent.
+
+metrics
+Configures sampling-based meters (CPU and memory).
+metrics:
+sampler_hz: 30
+pre_roll_s: 5.0
+post_delay_s: 0.1
+mode: dynamic
+Key:
+	• sampler_hz (float, optional, default = 30.0)
+Sampling frequency for CPU/memory meters.
+	• pre_roll_s (float, optional, default = 0.0)
+Time before inference to start sampling.
+	• post_delay_s (float, optional, default = 0.0)
+Time after inference to continue sampling.
+	• mode (string, optional, default = static)
+Static or dynamic memory windowing.
+Semantics:
+	• CPU utilization is sampled periodically, not measured per call.
+	• Memory tracking uses process RSS over time.
+	• In dynamic mode, inference boundaries are used to isolate peaks.
+
+output
+Controls where and how results are written.
+output:
+base_dir: runs
+formats: [json]
+run_name: torch_cpu_baseline
+Key:
+	• base_dir (string, optional, default = runs/)
+Root output directory.
+	• formats (list[string], optional, default = [json])
+Output formats (json, optional csv).
+	• run_name (string, optional, default = auto)
+Logical name used in output paths.
+Semantics:
+	• Outputs are append-only and never overwrite previous runs.
+	• Each run gets a timestamped subdirectory.
+	• Plot/report generation is controlled by CLI flags, not YAML.
+
+Backend-Specific Notes
+Torch:
+	• .pt files may execute pickle code.
+	• Only load trusted artifacts.
+ONNX Runtime:
+	• Provider chain is resolved dynamically.
+	• TensorRT Execution Provider is never enabled on Windows.
+OpenVINO:
+	• Accepts ONNX or IR depending on runner implementation.
+	• Devices: CPU, GPU, NPU, AUTO, HETERO:*.
+TensorRT:
+	• Linux / Jetson only.
+	• Requires statically-shaped, compatible ONNX models.
+
+Reproducibility & Publication Guidelines
+For scientific or comparative publications:
+	• Use fixed software versions (Python, Torch, ORT, OpenVINO).
+	• Disable background workloads.
+	• Ensure stable thermal conditions (avoid throttling).
+	• Report:
+		○ hardware configuration
+		○ batch size
+		○ warmups and repeats
+		○ backend and device policy
+	• Re-run benchmarks after system reboots to validate stability.
+
+Validation Guarantees
+	• Configs are parsed deterministically.
+	• Missing optional fields receive documented defaults.
+	• Structural regressions are caught by golden tests.
+	• Numeric values are intentionally not golden-tested.

@@ -1,0 +1,2 @@
+Parts of the implementation and documentation were developed with the assistance of AI-based code generation tools.
+All generated content was reviewed, validated, and integrated by the author.

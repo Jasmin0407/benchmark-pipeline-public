@@ -1,0 +1,72 @@
+# ============================================================
+# Multi-Device Benchmark Configuration (DeviceLoop)
+# Used by: bench/cli/multi.py -> bench.core.orchestrator.device_loop.DeviceLoop
+#
+# Purpose:
+# - Run the same model across multiple devices (CPU/GPU/NPU/AUTO/HETERO)
+# - Store one JSON per device under runs/<timestamp>/...
+# - Optionally generate aggregate plots and a Markdown report
+#
+# Single source of truth:
+# - Warmup and measurement loops are controlled via:
+#   run.warmups and run.repeats
+# ============================================================
+
+model:
+  backend: "openvino"
+  path: "path/to/your/model.xml"  # or .onnx depending on the runner
+  dtype: "fp32"                  # optional, for clarity/reporting
+
+input:
+  # Dummy input shape used for inference and shape-dependent metrics.
+  shape: [32, 361, 1]
+  batch: 32  # optional; runner may derive batch from shape[0]
+
+devices_to_test:
+  - "CPU"
+  - "GPU"
+  - "NPU"
+  - "AUTO"
+  - "HETERO:GPU,CPU"
+
+run:
+  # Warm-up iterations per device (not recorded).
+  warmups: 5
+
+  # Measured inference iterations per device.
+  repeats: 50
+
+  # Optional: CPU thread count for backends that support it (Torch/ORT CPU, etc.).
+  threads: 4
+
+  # Optional logging knobs (if your main/device code uses them).
+  log_level: "INFO"   # DEBUG/INFO/WARNING/ERROR
+  verbose: false      # if true, force DEBUG in your logger setup
+
+metrics:
+  # These are feature toggles (only effective if the pipeline respects them).
+  measure_memory: true
+  measure_latency: true
+  measure_mac_operations: true
+  measure_model_size: true
+
+  # Memory mode as implemented in your MemoryMeter.
+  memory_mode: "dynamic"  # or "static"
+
+  # Sampling related settings (only effective if your meters use them).
+  sampler_hz: 75
+  pre_roll_s: 5.0
+  post_delay_s: 10.0
+
+output:
+  # Base directory for multi runs. Actual output goes to runs/<timestamp>/...
+  base_dir: "runs"
+
+  # Store one JSON per device.
+  store_json: true
+
+  # If --plot is set on the CLI, plots are stored under runs/<timestamp>/plots/
+  store_plots: true
+
+  # Documentation only unless your code reads it.
+  plot_multi_device: "plots/latency_multi_device.png"

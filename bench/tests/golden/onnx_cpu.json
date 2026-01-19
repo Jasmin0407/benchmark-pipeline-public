@@ -1,0 +1,154 @@
+{
+  "meta": {
+    "timestamp": "2025-01-01T00:00:00Z",
+    "run_id": "redacted",
+    "framework": "torch",
+    "device_target": "cpu"
+  },
+  "model": {
+    "path": "inline",
+    "input_shape": [1, 1, 360],
+    "dtype": "float32",
+    "parameters": null,
+    "size_on_disk_bytes": null,
+    "dtype_breakdown": null
+  },
+  "metrics": {
+    "macs": null,
+    "inference_time_ms": null,
+    "throughput_sps": 47192.0494361084,
+    "cpu_utilization_pct": {
+      "mean": 44.75,
+      "p95": 0.0,
+      "sampling_interval_mean_s": 0.033151,
+      "sampling_stddev_s": 0.005414,
+      "sampling_drift_ms": -0.182
+    },
+    "memory": {
+      "rss_start_bytes": 455581696.0,
+      "rss_end_bytes": 455602176.0,
+      "rss_delta_bytes": 20480.0,
+      "rss_peak_bytes": 455602176.0,
+      "duration_s": null,
+      "pre_roll_s": 5.0,
+      "inference_duration_s": 0.00008270004764199257,
+      "post_delay_s": 0.1,
+      "infer_start_idx": 1,
+      "infer_end_idx": 2,
+      "sample_hz": 30.0,
+      "rss_samples": [
+        455581696,
+        455581696,
+        455598080,
+        455602176
+      ],
+      "timestamps_s": [
+        -5.0,
+        -4.96,
+        0.02,
+        0.115
+      ],
+      "weights_bytes": null,
+      "mode": "static",
+      "rss_peak_inference_bytes": 455598080.0,
+      "rss_delta_inference_bytes": 0.0
+    }
+  },
+  "config": {
+    "backend": "onnx_cpu"
+  },
+  "hardware": {
+    "table": {
+      "cpu": "Generic CPU",
+      "gpu": "Generic GPU",
+      "npu": "Generic NPU",
+      "ram_gb": 32.0,
+      "storage_gb": 512.0,
+      "os": "Windows"
+    },
+    "detail": {
+      "os": "Windows",
+      "architecture": "AMD64",
+      "cpu": {
+        "name": "Generic CPU",
+        "arch": "X86_64",
+        "cores_physical": 16,
+        "cores_logical": 22,
+        "max_freq_mhz": 1400.0
+      },
+      "ram_total_gb": 32.0,
+      "storage": {
+        "total_gb": 512.0,
+        "free_gb": 0.0
+      },
+      "gpus": [
+        {
+          "device": "GPU",
+          "name": "Generic GPU",
+          "vram_gb": null
+        }
+      ],
+      "npus": [
+        {
+          "device": "NPU",
+          "name": "Generic NPU",
+          "capabilities": ["FP16", "INT8", "EXPORT_IMPORT"]
+        }
+      ]
+    },
+    "capabilities": {
+      "supports_cuda": false,
+      "supports_tensorrt": false,
+      "supports_openvino": true,
+      "supports_onnx": true,
+      "cpu_isa": {
+        "avx": true,
+        "avx2": true,
+        "avx512": false,
+        "fma": true,
+        "bf16": false
+      },
+      "gpu": {
+        "fp16": true,
+        "int8": true,
+        "tensor_cores": false,
+        "compute_capability": null
+      },
+      "npu": {
+        "optimization_capabilities": ["FP16", "INT8", "EXPORT_IMPORT"],
+        "supports_fp16": true,
+        "supports_int8": true
+      },
+      "onnx_providers": ["CPUExecutionProvider"]
+    },
+    "fingerprint": "redacted"
+  },
+  "env": {
+    "python": "3.10.x",
+    "python_compiler": "MSVC",
+    "torch": "2.5.1",
+    "torch_cuda": null,
+    "torch_cudnn": null,
+    "onnx": "1.19.1",
+    "onnx_opset": 24,
+    "onnxruntime": "1.23.2",
+    "onnxruntime_providers": ["CPUExecutionProvider"],
+    "onnxruntime_providers_active": [],
+    "onnxruntime_cuda_available": false,
+    "openvino": "2024.6.0",
+    "openvino_devices": ["CPU", "GPU", "NPU"],
+    "openvino_capabilities": {
+      "CPU": ["FP32", "INT8", "BIN", "EXPORT_IMPORT"],
+      "GPU": ["FP32", "BIN", "FP16", "INT8", "EXPORT_IMPORT"],
+      "NPU": ["FP16", "INT8", "EXPORT_IMPORT"]
+    },
+    "openvino_ir_version": 11,
+    "tensorrt": null,
+    "cuda_toolkit": "redacted",
+    "cudnn": null,
+    "mkl": "redacted",
+    "numpy": "2.2.5",
+    "numpy_blas": "redacted",
+    "numba": null
+  }
+}

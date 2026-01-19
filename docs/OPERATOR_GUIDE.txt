@@ -1,0 +1,98 @@
+────────────────────────────────────────────
+OPERATOR_GUIDE.txt
+────────────────────────────────────────────
+Operator’s Guide — Benchmark Pipeline
+This guide describes how to operate the benchmark pipeline in a reproducible, production-grade manner.
+It is intended for engineers running benchmarks repeatedly across heterogeneous hardware backends.
+
+	1. Environment Preparation
+1.1 Use a Dedicated Environment
+	• Always use a fresh virtual environment.
+	• Avoid mixing benchmark dependencies with development tooling.
+	• Treat benchmarking environments as disposable and reproducible.
+Install the project:
+pip install -e .
+Backends are treated as optional plugins.
+
+	2. Configuration Workflow
+Recommended Practice:
+	1. Start from bench/configs/examples/.
+	2. Create machine-specific configs under bench/configs/local/.
+	3. Never commit:
+		○ absolute paths
+		○ machine-specific artifacts
+		○ model binaries
+
+	3. Running Benchmarks
+3.1 Single-Device Benchmark
+Command:
+python -m bench.cli.bench <CONFIG.yaml> --plot
+Execution flow:
+	• configuration is loaded and validated
+	• model artifact is loaded
+	• warmup iterations are executed
+	• measured repeats collect latency samples
+	• CPU and memory meters run concurrently
+	• results are written under runs/
+Operational guidance:
+	• warmups ≥ 2
+	• repeats ≥ 50 for stable percentiles
+
+3.2 Multi-Device Benchmark
+Command:
+python -m bench.cli.multi <CONFIG.yaml> --plot
+Behavior:
+	• iterates over multiple targets (CPU, GPU, NPU, AUTO, HETERO)
+	• produces one JSON artifact per device
+	• optional aggregated plots and reports are generated
+
+	4. Interpreting Results
+Typical run layout:
+runs/<run_name>//
+bench.json
+plots/
+bench.md
+Minimum sanity checks:
+	• latency metrics exist and are > 0
+	• percentiles are ordered (p50 ≤ p90 ≤ p99)
+	• throughput exists and is > 0
+	• memory peak is ≥ start value
+	• duration windows are consistent
+
+	5. Testing & Regression Safety
+Run the test suite:
+pytest -q
+Expected behavior:
+	• unit tests always run
+	• integration tests are backend-gated
+	• golden tests validate schema structure only
+Golden artifacts intentionally do not validate numeric values.
+
+	6. Internal / Proprietary Models (Option B Pattern)
+Policy:
+	• Public repository contains no model source code.
+	• Runtime consumes only serialized model artifacts.
+Recommended pattern:
+internal/model_source.py (gitignored)
+↓ export
+models/model.onnx
+↓ benchmark
+Export example:
+python -m bench.tools.export_internal_model --out models/model.onnx
+If the internal source file is missing, the export tool exits cleanly.
+
+	7. Common Failure Modes
+Shape mismatch:
+	• Input shape does not match the model artifact.
+	• Fix the YAML configuration, not the runner.
+Backend unavailable:
+	• Missing runtime or drivers.
+	• Integration tests skip with explicit reason.
+Skipped tests:
+	• Backend-gated by design.
+	• Inspect pytest skip messages.
+
+	8. Operating Standards (Recommended)
+	• Maintain one config per benchmark scenario.
+	• Re-run benchmarks after reboot for validation.
+	• Archive runs/ directories for long-term comparison.

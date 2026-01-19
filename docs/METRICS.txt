@@ -1,0 +1,269 @@
+BENCHMARK PIPELINE — METRICS 
+==============================
+
+Scope
+-----
+This document defines the benchmark output metrics produced by the pipeline.
+It is written to be audit-friendly: every metric has a clear unit, definition,
+and (where applicable) a computation rule.
+
+The pipeline distinguishes between:
+- Model metadata (what is benchmarked)
+- Run metadata (how/where it was benchmarked)
+- Metrics (what was measured or derived)
+
+Unless stated otherwise:
+- Time is reported in milliseconds (ms)
+- Memory is reported in bytes (B)
+- Rates are reported in samples per second (samples/s)
+
+
+1) Result Payload Layout (high level)
+------------------------------------
+Typical single-run payload (bench.json):
+
+meta:
+  framework              # e.g., "torch", "onnxruntime", "openvino", "tensorrt"
+  device_target          # e.g., "cpu", "cuda:0", "ort:cpu", "AUTO:CPU,GPU"
+  timestamp
+  run_id
+
+model:
+  path
+  input_shape            # shape used for benchmarking (including batch dimension)
+  dtype
+  parameters
+  size_on_disk_bytes
+
+metrics:
+  inference_time_ms: {...}
+  throughput_sps
+  cpu_utilization_pct: {...}
+  memory: {...}
+  (optional) macs: {...}
+  (optional) model_size: {...}
+  (optional) env/hardware blocks may exist depending on run configuration
+
+
+2) Inference Latency Metrics (metrics.inference_time_ms)
+--------------------------------------------------------
+These metrics describe the distribution of inference runtimes.
+
+2.1 Core distribution
+- mean
+  Unit: ms
+  Definition: Arithmetic mean of measured inference-call latencies.
+  Important: mean is "per inference call" (typically a batch).
+
+- p50, p90, p95, p99
+  Unit: ms
+  Definition: Percentiles of the inference-call latency distribution.
+  Interpretation: p95 is the latency value under which 95% of inference calls fall.
+
+- samples
+  Unit: ms
+  Definition: Raw list of per-iteration inference-call latencies used to compute
+  mean and percentiles. This enables independent recomputation and verification.
+
+2.2 Batch-aware reporting (recommended for fair comparisons)
+If the benchmark uses batch size > 1, the pipeline may additionally report:
+
+- batch_size
+  Unit: count
+  Definition: Batch size used during measurement, derived from the input tensor
+  shape (or explicit input config). This is explicitly reported to make comparisons
+  across different configurations reproducible.
+
+- mean_per_sample
+  Unit: ms
+  Definition: Normalized mean latency per sample:
+      mean_per_sample = mean / batch_size
+  Rationale: mean is measured per inference call (per batch). mean_per_sample
+  normalizes batch latency to a per-sample cost, improving comparability when
+  batch sizes differ.
+
+Operational guidance:
+- Use mean/p95/p99 for SLA-style latency statements ("per call").
+- Use mean_per_sample when comparing different batch sizes or deployments where
+  batch size is not constant.
+
+Notes:
+- If batch_size is missing, treat mean_per_sample as unavailable ("-").
+- If batch_size == 0 or invalid, mean_per_sample must not be computed.
+
+
+3) Throughput (metrics.throughput_sps)
+--------------------------------------
+- throughput_sps
+  Unit: samples/s
+  Definition: Effective processing rate.
+  Common implementation: samples_processed / elapsed_seconds.
+  If benchmarking is executed in batches, throughput is usually batch_size-aware.
+
+Interpretation:
+- Throughput is a rate metric; it should be interpreted together with latency
+  and batch_size. Higher batch sizes often increase throughput but may increase
+  per-call latency.
+
+
+4) CPU Utilization (metrics.cpu_utilization_pct)
+------------------------------------------------
+These metrics summarize CPU usage observed during the benchmark window.
+
+- mean
+  Unit: %
+  Definition: Mean CPU utilization over sampled time points.
+
+- p95 (and potentially other percentiles)
+  Unit: %
+  Definition: Percentile of CPU utilization samples.
+
+Implementation notes:
+- Many profilers report "aggregate CPU%" (e.g., >100% on multi-core systems).
+  If the pipeline reports aggregate values, interpret them as:
+  100% ~= one fully saturated logical core.
+- Sampling frequency (cpu_hz) and measurement window boundaries affect values.
+
+
+5) Memory Metrics (metrics.memory)
+----------------------------------
+The pipeline reports both:
+(A) Theoretical / static estimates (weights/activations)
+(B) Empirical runtime measurements (RSS / peak values)
+
+5.1 Theoretical memory (model/graph dependent)
+- weights_bytes
+  Unit: B
+  Definition: Estimated storage size for model weights.
+  Source:
+  - Torch: state_dict tensor sizes
+  - ONNX: initializer tensor sizes
+
+- activations_bytes
+  Unit: B
+  Definition: Estimated activation memory (intermediate tensors) for the given
+  input shape and execution mode (if supported by the backend).
+  Note: This is typically an estimate; actual runtime may differ due to fusion,
+  reuse, allocator behavior, and backend optimizations.
+
+- total_theoretical_bytes
+  Unit: B
+  Definition: weights_bytes + activations_bytes
+
+Caveat:
+- Theoretical activation memory often has high variance across runtimes/backends.
+  Treat it as an engineering estimate, not a hard guarantee.
+
+5.2 Empirical process memory (RSS-based; OS dependent)
+RSS (Resident Set Size) approximates the physical memory used by the process.
+It is influenced by allocator caching, runtime libraries, and OS behavior.
+
+Common fields:
+- rss_start_bytes
+  Unit: B
+  Definition: RSS at the start of the measurement window.
+
+- rss_mean_bytes
+  Unit: B
+  Definition: Mean RSS over the entire benchmark observation window.
+
+- rss_peak_bytes
+  Unit: B
+  Definition: Peak RSS over the entire benchmark observation window.
+
+- rss_mean_inference_bytes
+  Unit: B
+  Definition: Mean RSS during the inference window only (excludes pre-roll and
+  post-delay if configured).
+
+- rss_peak_inference_bytes
+  Unit: B
+  Definition: Peak RSS during the inference window only.
+
+5.3 Explicit "model-specific runtime memory requirements"
+To make model-specific runtime memory requirements explicit and comparable, the
+pipeline can compute derived fields:
+
+- rss_baseline_mean_bytes
+  Unit: B
+  Definition: Baseline mean RSS before inference (pre-roll window mean).
+  Rationale: A baseline mean is more robust than a single rss_start point.
+
+- model_specific_runtime_memory_bytes
+  Unit: B
+  Definition: Additional RSS attributable to running inference:
+      model_specific_runtime_memory_bytes =
+          max(0, rss_mean_inference_bytes - rss_baseline_mean_bytes)
+
+Interpretation:
+- This metric approximates the incremental RAM requirement of executing the model
+  under the given runtime/backend and input shape.
+- It is still RSS-based and can include allocator caches and backend workspace.
+
+5.4 Minimum RAM recommendation (deployment sizing)
+- memory_safety_margin_pct
+  Unit: %
+  Definition: Configurable safety margin to account for variance, fragmentation,
+  and co-located services. Typical default: 15%.
+
+- minimal_required_ram_bytes
+  Unit: B
+  Definition: Conservative sizing recommendation:
+      minimal_required_ram_bytes =
+          rss_peak_inference_bytes * (1 + memory_safety_margin_pct/100)
+
+- memory_recommendation
+  Unit: text
+  Definition: Human-readable sizing statement derived from minimal_required_ram_bytes.
+
+Operational guidance:
+- Use minimal_required_ram_bytes for device selection and OOM risk assessment.
+- Use model_specific_runtime_memory_bytes to compare backends or model versions
+  under matched conditions (same input shape, same environment).
+
+
+6) Optional / Common Additional Metrics (if enabled in your pipeline)
+--------------------------------------------------------------------
+Depending on configuration and backend support, additional metrics may be present:
+
+- macs
+  Unit: count (Multiply–Accumulate operations)
+  Definition: Estimated MACs for a single forward pass.
+  Notes:
+  - This is model-graph dependent and may be unavailable for non-DL algorithms.
+  - For classical algorithms (e.g., Pan–Tompkins), MACs may not be meaningful.
+
+- model_size
+  Definition: Parameter count breakdown and on-disk size.
+  Typical keys:
+  - parameters_total
+  - weights_bytes
+  - total_on_disk_bytes
+
+- GPU / accelerator memory
+  Some environments report GPU VRAM usage separately (backend/tool dependent).
+  If present, treat it analogous to RSS but for device memory.
+
+
+7) Measurement Windows and Sampling
+-----------------------------------
+Many time-series metrics depend on controlled windows:
+- pre_roll_s: time to observe baseline (no inference)
+- inference window: iterative inference measurement period
+- post_delay_s: time to observe deallocation / steady-state after inference
+- sampler_hz / cpu_hz: sampling frequency for memory/CPU
+
+Engineering note:
+- Increasing sampling frequency improves temporal resolution but can add overhead.
+- Always compare runs with the same window parameters for fair analysis.
+
+
+8) Reproducibility Checklist (what must match)
+----------------------------------------------
+To compare results across devices/backends, keep the following aligned:
+- Same model artifact (hash / file)
+- Same input_shape (including batch)
+- Same batch_size policy (and report it)
+- Same warm-up policy and iteration count (if applicable)
+- Same window configuration (pre_roll_s, post_delay_s, sampler_hz/cpu_hz)
+- Same software stack versions (env block: python, runtime, drivers)

@@ -1,0 +1,93 @@
+# ============================================================
+# Single-Device Benchmark Configuration
+# Used by: bench/cli/bench.py  ->  bench.core.main.main(...)
+#
+# Purpose:
+# - Run ONE backend (torch / onnx / openvino / tensorrt) on ONE target device
+# - Produce structured benchmark outputs (JSON/plots depending on your pipeline)
+#
+# Notes:
+# - "model.path" must point to a local model artifact (not committed to git).
+# - "device.target" selects the execution device (e.g., "cpu", "cuda:0", "ort:cpu", "CPU", "GPU", ...),
+#   depending on the backend and runner implementation.
+# ============================================================
+
+model:
+  # Local path to the model file (e.g., .onnx / .pt / .xml depending on backend).
+  # Use a placeholder in example configs; real paths should be in local configs ignored by git.
+  path: "path to your model"
+
+  # Backend determines which Runner is used:
+  # - "torch"    -> TorchRunner
+  # - "onnx"     -> OnnxRunner (ONNX Runtime)
+  # - "openvino" -> OpenVinoRunner
+  # - "tensorrt" -> TensorRTRunner (Linux only in your current setup)
+  backend: "onnx"
+
+  # Optional: explicit model dtype for reporting / validation (depends on your schema usage).
+  # dtype: "fp32"
+
+input:
+  # Model input tensor shape used for dummy input generation and MACs/shape-dependent metrics.
+  # Keep consistent with the model's expected input signature.
+  shape: [32, 361, 1]
+
+  # Optional: if your pipeline uses this field explicitly.
+  # batch is sometimes redundant if batch is already part of "shape".
+  batch: 32
+
+device:
+  # Target device string for the selected backend.
+  # For ONNX Runtime you may use patterns like:
+  # - "ort:cpu"
+  # - "ort:cuda"
+  # For plain CPU it may be "cpu" (depending on runner).
+  target: "ort:cpu"
+
+  # If implemented: allow fallback when the requested device is not available.
+  # Example: if CUDA provider isn't present, fallback to CPU.
+  allow_fallback: false
+
+run:
+  # Number of warm-up iterations before collecting timing metrics.
+  # Warm-up reduces first-run overhead (graph compilation, caching, memory allocation).
+  warmups: 5
+
+  # Number of measured inference iterations for timing statistics.
+  repeats: 10
+
+  # Threads used for CPU execution (if supported by the runner/backend).
+  threads: 4
+
+metrics:
+  # Sampling frequency for CPU/RAM sampling (Hz). Higher = more fine-grained but more overhead.
+  sampler_hz: 75
+
+  # Seconds of sampling before the inference call (baseline stabilization).
+  pre_roll_s: 5.0
+
+  # Seconds of sampling after inference (captures deallocation / caching behavior).
+  post_delay_s: 10.0
+
+  # Memory sampling mode:
+  # - "static": run inference once, capture pre/post/infer windows
+  # - "dynamic": repeatedly infer during sampling window (stress / steady-state behavior)
+  memory_mode: "dynamic"  # or "static"
+
+  # Optional: if your CpuMeter uses a separate sampling rate.
+  cpu_hz: 50
+
+  # Optional Jetson-specific flag (tegrastats). On non-Jetson systems should be false.
+  tegrastats: false
+
+output:
+  # Output directory for this run.
+  # Recommendation: for examples, keep this generic and avoid absolute paths.
+  dir: "runs/onnx_cpu"
+
+  # Output formats to write.
+  # Your pipeline currently writes JSON; CSV depends on writer implementation.
+  formats: ["json"]
+
+  # Optional: report detail level if supported by your writers/reporters.
+  profile_level: "basic"
