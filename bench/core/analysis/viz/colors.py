@@ -42,9 +42,24 @@ def color_for_framework(name: str) -> str:
 
 def color_for_device(dev: str) -> str:
     d = dev.lower()
+
+    # Strip framework prefixes (e.g. ORT:CPU, OV:NPU)
+    if ":" in d:
+        d = d.split(":", 1)[1]
+
+    # Normalize common aliases
+    if d in ("cuda", "cudagpu", "nvidia"):
+        d = "gpu"
+    if d in ("openvino_gpu", "ov_gpu"):
+        d = "gpu"
+    if d in ("openvino_npu", "ov_npu"):
+        d = "npu"
+
     if d.startswith("hetero"):
         return DEVICE_COLORS["hetero"]
+
     return DEVICE_COLORS.get(d, "#888888")
+
 
 
 def phase_color(phase: str) -> str:
