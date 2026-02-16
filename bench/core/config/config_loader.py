@@ -21,7 +21,7 @@ import yaml
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "model": {"path": None, "backend": "torch", "dtype": "fp32"},
-    "input": {"shape": [1, 1, 3600], "batch": 1},
+    "input": {"shape": [1, 1, 3600], "batch": 1, "fs_hz": None},
     "device": {"target": "cpu", "allow_fallback": False},
     # Single schema: warmups/repeats live here for both single- and multi-device flows
     "run": {"warmups": 5, "repeats": 10, "threads": 4, "log_level": "INFO", "verbose": False},
