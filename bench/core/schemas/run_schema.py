@@ -32,6 +32,11 @@ class ModelSchema(BaseModel):
     parameters: Optional[int] = None
     size_on_disk_bytes: Optional[int] = None
     dtype_breakdown: Optional[Dict[str, int]] = None
+    # Optional input-length metadata (best-effort runtime-derived values).
+    # These fields enable reporting like "60s signal -> X ms" without guessing.
+    fs_hz: Optional[float] = None
+    input_num_samples: Optional[int] = None
+    input_duration_s: Optional[float] = None
 
 # =========================
 # MEMORY
@@ -67,6 +72,7 @@ class MetricsSchema(BaseModel):
     throughput_sps: Optional[float] = None
     cpu_utilization_pct: Optional[Dict[str, float]] = None
     memory: Optional[MemorySchema] = None
+    ms_per_signal_s: Optional[float] = None
 
 # =========================
 # RUN ROOT
