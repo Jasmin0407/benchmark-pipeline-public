@@ -7,11 +7,18 @@
   },
   "model": {
     "path": "inline",
-    "input_shape": [1, 1, 360],
+    "input_shape": [
+      1,
+      1,
+      360
+    ],
     "dtype": "float32",
     "parameters": null,
     "size_on_disk_bytes": null,
-    "dtype_breakdown": null
+    "dtype_breakdown": null,
+    "fs_hz": null,
+    "input_num_samples": null,
+    "input_duration_s": null
   },
   "metrics": {
     "macs": null,
@@ -31,7 +38,7 @@
       "rss_peak_bytes": 455602176.0,
       "duration_s": null,
       "pre_roll_s": 5.0,
-      "inference_duration_s": 0.00008270004764199257,
+      "inference_duration_s": 8.270004764199257e-05,
       "post_delay_s": 0.1,
       "infer_start_idx": 1,
       "infer_end_idx": 2,
@@ -52,7 +59,8 @@
       "mode": "static",
       "rss_peak_inference_bytes": 455598080.0,
       "rss_delta_inference_bytes": 0.0
-    }
+    },
+    "ms_per_signal_s": null
   },
   "config": {
     "backend": "onnx_cpu"
@@ -92,7 +100,11 @@
         {
           "device": "NPU",
           "name": "Generic NPU",
-          "capabilities": ["FP16", "INT8", "EXPORT_IMPORT"]
+          "capabilities": [
+            "FP16",
+            "INT8",
+            "EXPORT_IMPORT"
+          ]
         }
       ]
     },
@@ -115,11 +127,17 @@
         "compute_capability": null
       },
       "npu": {
-        "optimization_capabilities": ["FP16", "INT8", "EXPORT_IMPORT"],
+        "optimization_capabilities": [
+          "FP16",
+          "INT8",
+          "EXPORT_IMPORT"
+        ],
         "supports_fp16": true,
         "supports_int8": true
       },
-      "onnx_providers": ["CPUExecutionProvider"]
+      "onnx_providers": [
+        "CPUExecutionProvider"
+      ]
     },
     "fingerprint": "redacted"
   },
@@ -132,15 +150,36 @@
     "onnx": "1.19.1",
     "onnx_opset": 24,
     "onnxruntime": "1.23.2",
-    "onnxruntime_providers": ["CPUExecutionProvider"],
+    "onnxruntime_providers": [
+      "CPUExecutionProvider"
+    ],
     "onnxruntime_providers_active": [],
     "onnxruntime_cuda_available": false,
     "openvino": "2024.6.0",
-    "openvino_devices": ["CPU", "GPU", "NPU"],
+    "openvino_devices": [
+      "CPU",
+      "GPU",
+      "NPU"
+    ],
     "openvino_capabilities": {
-      "CPU": ["FP32", "INT8", "BIN", "EXPORT_IMPORT"],
-      "GPU": ["FP32", "BIN", "FP16", "INT8", "EXPORT_IMPORT"],
-      "NPU": ["FP16", "INT8", "EXPORT_IMPORT"]
+      "CPU": [
+        "FP32",
+        "INT8",
+        "BIN",
+        "EXPORT_IMPORT"
+      ],
+      "GPU": [
+        "FP32",
+        "BIN",
+        "FP16",
+        "INT8",
+        "EXPORT_IMPORT"
+      ],
+      "NPU": [
+        "FP16",
+        "INT8",
+        "EXPORT_IMPORT"
+      ]
     },
     "openvino_ir_version": 11,
     "tensorrt": null,
