@@ -132,6 +132,77 @@ class MeasureController:
             batch_size = 1
 
         # ------------------------------------------------------------------
+        # Best-effort input length extraction (audit-friendly)
+        # ------------------------------------------------------------------
+        # Source of truth:
+        # 1) The actual input object passed to runner.infer(...)
+        # 2) Fallback to config shape/fs_hz if runtime shape is unavailable
+        actual_input_shape: Optional[List[int]] = None
+        input_num_samples: Optional[int] = None
+
+        # Try to locate the first tensor/array-like object (dict[str, arr] or plain arr).
+        try:
+            if isinstance(dummy_input, dict) and dummy_input:
+                arr_any = next(iter(dummy_input.values()))
+            else:
+                arr_any = dummy_input
+
+            shp_any = getattr(arr_any, "shape", None)
+            if shp_any is not None:
+                actual_input_shape = list(shp_any)  # type: ignore[arg-type]
+                if len(actual_input_shape) >= 1:
+                    # Convention for ECG-like signals is often [B, C, N] where the last
+                    # dimension corresponds to time samples. Some exported models use
+                    # other layouts (e.g. [B, N, C]).
+                    #
+                    # To keep this audit-friendly and minimal, allow overriding the sample
+                    # axis via config:
+                    #   input.samples_axis: <int>   (default: -1)
+                    samples_axis = -1
+                    try:
+                        inp_cfg = _deep_get(self.cfg, ["input"], {}) or {}
+                        if isinstance(inp_cfg, dict):
+                            samples_axis = int(inp_cfg.get("samples_axis", -1))
+                    except Exception:
+                        samples_axis = -1
+
+                    if samples_axis < 0:
+                        samples_axis = len(actual_input_shape) + samples_axis
+
+                    if 0 <= samples_axis < len(actual_input_shape):
+                        n_dim = actual_input_shape[samples_axis]
+                        if isinstance(n_dim, (int, np.integer)) and int(n_dim) > 0:
+                            input_num_samples = int(n_dim)
+        except Exception:
+            # Keep None on extraction failure. We will fall back to config below.
+            actual_input_shape = None
+            input_num_samples = None
+
+        # Fallback: config-defined shape if runtime extraction is unavailable.
+        if actual_input_shape is None:
+            shp_cfg = input_spec.get("shape")
+            if isinstance(shp_cfg, list) and shp_cfg:
+                actual_input_shape = [int(x) for x in shp_cfg if isinstance(x, (int, float, np.integer))]
+
+        # Sampling rate fallback (for input duration in seconds).
+        fs_hz: Optional[float] = None
+        try:
+            fs_val = None
+            inp_cfg = _deep_get(self.cfg, ["input"], {}) or {}
+            if isinstance(inp_cfg, dict):
+                fs_val = inp_cfg.get("fs_hz")
+                if fs_val is None and isinstance(inp_cfg.get("signal"), dict):
+                    fs_val = inp_cfg["signal"].get("fs_hz")
+            if fs_val is not None:
+                fs_hz = float(fs_val)
+        except Exception:
+            fs_hz = None
+
+        input_duration_s: Optional[float] = None
+        if input_num_samples is not None and fs_hz is not None and fs_hz > 0:
+            input_duration_s = float(input_num_samples) / float(fs_hz)
+
+        # ------------------------------------------------------------------
         # 2) Runner warmup (explicit)
         # ------------------------------------------------------------------
         # Keep this warmup because runners might need setup / compilation.
@@ -176,6 +247,12 @@ class MeasureController:
 
         throughput_ips = (1000.0 / mean_ms) if mean_ms > 0 else None
         throughput_sps = (throughput_ips * batch_size) if throughput_ips is not None else None
+
+        # Optional signal-normalized latency (ms per second of input signal).
+        # This is only meaningful if we can reliably infer input_duration_s.
+        ms_per_signal_s: Optional[float] = None
+        if input_duration_s is not None and input_duration_s > 0 and mean_ms > 0:
+            ms_per_signal_s = float(mean_ms) / float(input_duration_s)
 
         # ------------------------------------------------------------------
         # 4) Memory + aligned CPU/GPU monitoring (single inference block)
@@ -341,6 +418,14 @@ class MeasureController:
         # ------------------------------------------------------------------
         return {
             # Top-level keys used by existing callers (e.g., bench/core/main.py)
+            # Runtime-derived input facts (best-effort). These are the source of truth
+            # for downstream reporting, because runners may adapt shapes internally.
+            "actual_input_shape": actual_input_shape,
+            "input_num_samples": input_num_samples,
+            "input_fs_hz": fs_hz,
+            "input_duration_s": input_duration_s,
+            "ms_per_signal_s": ms_per_signal_s,
+
             "timing_ms": stats,
             "throughput_bps": throughput_ips,
             "throughput_sps": throughput_sps,
@@ -352,6 +437,9 @@ class MeasureController:
             # Adapter block (tests / schemas can rely on this)
             "metrics": {
                 "inference_time_ms": stats,
+                # Input-length aware additions (derived from the real dummy_input)
+                "ms_per_signal_s": ms_per_signal_s,
+
                 "throughput_sps": throughput_sps,
                 "cpu_utilization_pct": cpu_result,
                 "gpu_utilization_pct": gpu_util,
