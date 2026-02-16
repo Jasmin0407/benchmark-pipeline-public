@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, List, Tuple
+from typing import Any, Dict, Mapping, List, Tuple
 
 from bench.core.utils.path_sanitizer import sanitize_device_key
 
@@ -18,6 +18,44 @@ def _fmt(v: Any) -> str:
     if isinstance(v, float):
         return f"{v:.6g}"
     return str(v)
+
+
+# ------------------------------------------------------------------
+# Reporting helpers (human-friendly units + derived interpretation)
+# ------------------------------------------------------------------
+# We intentionally use SI units (MB/GB, base-10) in the Markdown report.
+# Raw bytes remain available in bench.json for audit / reproducibility.
+def _fmt_mb_from_bytes(b: Any) -> str:
+    """Format a bytes value as MB (SI, 1 MB = 1_000_000 bytes)."""
+    if b is None:
+        return "-"
+    try:
+        return f"{float(b) / 1_000_000:.3f}"
+    except Exception:
+        return "-"
+
+
+def _fmt_gb_from_bytes(b: Any) -> str:
+    """Format a bytes value as GB (SI, 1 GB = 1_000_000_000 bytes)."""
+    if b is None:
+        return "-"
+    try:
+        return f"{float(b) / 1_000_000_000:.3f}"
+    except Exception:
+        return "-"
+
+
+def _fmt_cores_equiv(aggregate_pct: Any) -> str:
+    """
+    Convert aggregate CPU utilization (%) into a 'cores-equivalent' number.
+    Example: 200% ≈ 2.0 cores worth of compute time.
+    """
+    if aggregate_pct is None:
+        return "-"
+    try:
+        return f"{float(aggregate_pct) / 100.0:.2f}"
+    except Exception:
+        return "-"
 
 
 def _safe_get(d: Dict[str, Any], path: List[str]) -> Any:
@@ -43,6 +81,7 @@ def _extract_core_metrics(res: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "inf_mean_ms": inf.get("mean"),
         "inf_p50_ms": inf.get("p50"),
+        "inf_p90_ms": inf.get("p90"),
         "inf_p95_ms": inf.get("p95"),
         "inf_p99_ms": inf.get("p99"),
         # Batch-aware latency reporting:
@@ -51,6 +90,7 @@ def _extract_core_metrics(res: Dict[str, Any]) -> Dict[str, Any]:
         "inf_batch_size": inf.get("batch_size"),
         "inf_mean_per_sample_ms": inf.get("mean_per_sample"),
         "throughput_sps": res.get("metrics", {}).get("throughput_sps") or res.get("throughput_sps"),
+        "ms_per_signal_s": res.get("metrics", {}).get("ms_per_signal_s") or res.get("ms_per_signal_s"),
         "cpu_mean_pct": cpu.get("mean"),
         "cpu_p95_pct": cpu.get("p95"),
         "rss_peak_infer_bytes": mem.get("rss_peak_inference_bytes"),
@@ -95,36 +135,58 @@ def _write_single_run_report(run_dir: Path, results: Dict[str, Any]) -> None:
         lines.append(f"- **Path**: `{_fmt(model.get('path'))}`")
     if model.get("input_shape") is not None:
         lines.append(f"- **Input shape**: `{_fmt(model.get('input_shape'))}`")
+    if model.get("input_duration_s") is not None:
+        lines.append(f"- **Input duration (s)**: `{_fmt(model.get('input_duration_s'))}`")
+    if model.get("fs_hz") is not None:
+        lines.append(f"- **Sampling rate (Hz)**: `{_fmt(model.get('fs_hz'))}`")
+    if model.get("input_num_samples") is not None:
+        lines.append(f"- **Input samples**: `{_fmt(model.get('input_num_samples'))}`")
     if model.get("dtype"):
         lines.append(f"- **DType**: `{_fmt(model.get('dtype'))}`")
     if model.get("parameters") is not None:
         lines.append(f"- **Parameters**: `{_fmt(model.get('parameters'))}`")
     if model.get("size_on_disk_bytes") is not None:
-        lines.append(f"- **Size on disk (bytes)**: `{_fmt(model.get('size_on_disk_bytes'))}`")
+        # Keep the report human-readable: show MB instead of raw bytes.
+        lines.append(f"- **Size on disk (MB)**: `{_fmt_mb_from_bytes(model.get('size_on_disk_bytes'))}`")
 
     # Metrics (compact)
     core = _extract_core_metrics({"metrics": metrics, **results})
     lines.append("\n## Metrics\n")
     lines.append(f"- **Inference mean (ms)**: `{_fmt(core.get('inf_mean_ms'))}`")
     lines.append(f"- **Inference p50 (ms)**: `{_fmt(core.get('inf_p50_ms'))}`")
+    lines.append(f"- **Inference p90 (ms)**: `{_fmt(core.get('inf_p90_ms'))}`")
     lines.append(f"- **Inference p95 (ms)**: `{_fmt(core.get('inf_p95_ms'))}`")
     lines.append(f"- **Inference p99 (ms)**: `{_fmt(core.get('inf_p99_ms'))}`")
     lines.append(f"- **Inference batch size**: `{_fmt(core.get('inf_batch_size'))}`")
     lines.append(f"- **Inference mean per sample (ms)**: `{_fmt(core.get('inf_mean_per_sample_ms'))}`")
     lines.append(f"- **Throughput (samples/s)**: `{_fmt(core.get('throughput_sps'))}`")
-    lines.append(f"- **CPU util mean (aggregate %)**: `{_fmt(core.get('cpu_mean_pct'))}`")
-    lines.append(f"- **CPU util p95 (aggregate %)**: `{_fmt(core.get('cpu_p95_pct'))}`")
-    lines.append(f"- **RSS peak inference (bytes)**: `{_fmt(core.get('rss_peak_infer_bytes'))}`")
-    lines.append(f"- **RSS peak (bytes)**: `{_fmt(core.get('rss_peak_bytes'))}`")
+    if core.get("ms_per_signal_s") is not None:
+        lines.append(f"- **ms per second of signal**: `{_fmt(core.get('ms_per_signal_s'))}`")
+        lines.append("- Note: This value is derived from the measured inference mean and the runtime-derived input duration.")
+
+    # CPU utilization is reported as aggregate % (sum across logical cores).
+    # Add a derived "cores-equivalent" value for quick interpretation.
+    lines.append(
+        f"- **CPU util mean (aggregate %)**: `{_fmt(core.get('cpu_mean_pct'))}` "
+        f"(≈ `{_fmt_cores_equiv(core.get('cpu_mean_pct'))}` cores)"
+    )
+    lines.append(
+        f"- **CPU util p95 (aggregate %)**: `{_fmt(core.get('cpu_p95_pct'))}` "
+        f"(≈ `{_fmt_cores_equiv(core.get('cpu_p95_pct'))}` cores)"
+    )
+
+    # Memory/RSS: present SI MB/GB to keep the report readable.
+    lines.append(f"- **RSS peak inference (MB)**: `{_fmt_mb_from_bytes(core.get('rss_peak_infer_bytes'))}`")
+    lines.append(f"- **RSS peak (MB)**: `{_fmt_mb_from_bytes(core.get('rss_peak_bytes'))}`")
     # Make model-specific runtime memory requirements explicit (optional fields)
-    lines.append(f"- **RSS baseline mean (bytes)**: `{_fmt(core.get('rss_baseline_mean_bytes'))}`")
-    lines.append(f"- **RSS mean during inference (bytes)**: `{_fmt(core.get('rss_mean_infer_bytes'))}`")
-    lines.append(f"- **Model-specific runtime memory (bytes)**: `{_fmt(core.get('model_specific_runtime_memory_bytes'))}`")
+    lines.append(f"- **RSS baseline mean (MB)**: `{_fmt_mb_from_bytes(core.get('rss_baseline_mean_bytes'))}`")
+    lines.append(f"- **RSS mean during inference (MB)**: `{_fmt_mb_from_bytes(core.get('rss_mean_infer_bytes'))}`")
+    lines.append(f"- **Model-specific runtime memory (MB)**: `{_fmt_mb_from_bytes(core.get('model_specific_runtime_memory_bytes'))}`")
     lines.append(f"- **Memory safety margin (%)**: `{_fmt(core.get('memory_safety_margin_pct'))}`")
-    lines.append(f"- **Recommended minimum RAM (bytes)**: `{_fmt(core.get('minimal_required_ram_bytes'))}`")
+    lines.append(f"- **Recommended minimum RAM (MB)**: `{_fmt_mb_from_bytes(core.get('minimal_required_ram_bytes'))}`")
+    lines.append(f"- **Recommended minimum RAM (GB)**: `{_fmt_gb_from_bytes(core.get('minimal_required_ram_bytes'))}`")
     if core.get("memory_recommendation") is not None:
         lines.append(f"- **Memory recommendation**: `{_fmt(core.get('memory_recommendation'))}`")
- 
 
     # Config (keep readable)
     lines.append("\n## Config\n")
@@ -198,24 +260,25 @@ def _write_multi_run_reports(run_dir: Path, results_by_device: Mapping[str, Dict
 
     lines.append("\n## Summary\n")
     lines.append(
-        "| Device | Mean (ms) | p95 (ms) | p99 (ms) | Throughput (sps) | CPU mean (agg %) | RSS peak infer (bytes) | Report |"
+        "| Device | Mean (ms) | p95 (ms) | p99 (ms) | Throughput (sps) | CPU mean (agg %) | CPU mean (cores) | RSS peak infer (MB) | Report |"
     )
     lines.append(
-        "|---|---:|---:|---:|---:|---:|---:|---|"
+        "|---|---:|---:|---:|---:|---:|---:|---:|---|"
     )
 
     for dev, m in rows:
         safe_dev = sanitize_device_key(dev)
         per_dev_md_rel = Path("devices") / safe_dev / "bench.md"
         lines.append(
-            "| {dev} | {mean} | {p95} | {p99} | {thr} | {cpu} | {rss} | {link} |".format(
+            "| {dev} | {mean} | {p95} | {p99} | {thr} | {cpu} | {cores} | {rss_mb} | {link} |".format(
                 dev=dev,
                 mean=_fmt(m.get("inf_mean_ms")),
                 p95=_fmt(m.get("inf_p95_ms")),
                 p99=_fmt(m.get("inf_p99_ms")),
                 thr=_fmt(m.get("throughput_sps")),
                 cpu=_fmt(m.get("cpu_mean_pct")),
-                rss=_fmt(m.get("rss_peak_infer_bytes")),
+                cores=_fmt_cores_equiv(m.get("cpu_mean_pct")),
+                rss_mb=_fmt_mb_from_bytes(m.get("rss_peak_infer_bytes")),
                 link=f"[bench.md]({per_dev_md_rel.as_posix()})",
             )
         )
@@ -265,6 +328,12 @@ def _write_multi_run_reports(run_dir: Path, results_by_device: Mapping[str, Dict
             dlines.append(f"- **Path**: `{_fmt(model.get('path'))}`")
         if model.get("input_shape") is not None:
             dlines.append(f"- **Input shape**: `{_fmt(model.get('input_shape'))}`")
+        if model.get("input_duration_s") is not None:
+            dlines.append(f"- **Input duration (s)**: `{_fmt(model.get('input_duration_s'))}`")
+        if model.get("fs_hz") is not None:
+            dlines.append(f"- **Sampling rate (Hz)**: `{_fmt(model.get('fs_hz'))}`")
+        if model.get("input_num_samples") is not None:
+            dlines.append(f"- **Input samples**: `{_fmt(model.get('input_num_samples'))}`")
         if model.get("dtype"):
             dlines.append(f"- **DType**: `{_fmt(model.get('dtype'))}`")
 
@@ -276,19 +345,31 @@ def _write_multi_run_reports(run_dir: Path, results_by_device: Mapping[str, Dict
         dlines.append(f"- **Inference batch size**: `{_fmt(core.get('inf_batch_size'))}`")
         dlines.append(f"- **Inference mean per sample (ms)**: `{_fmt(core.get('inf_mean_per_sample_ms'))}`")
         dlines.append(f"- **Throughput (samples/s)**: `{_fmt(core.get('throughput_sps'))}`")
-        dlines.append(f"- **CPU util mean (aggregate %)**: `{_fmt(core.get('cpu_mean_pct'))}`")
-        dlines.append(f"- **CPU util p95 (aggregate %)**: `{_fmt(core.get('cpu_p95_pct'))}`")
-        dlines.append(f"- **RSS peak inference (bytes)**: `{_fmt(core.get('rss_peak_infer_bytes'))}`")
-        dlines.append(f"- **RSS peak (bytes)**: `{_fmt(core.get('rss_peak_bytes'))}`")
+        if core.get("ms_per_signal_s") is not None:
+            dlines.append(f"- **ms per second of signal**: `{_fmt(core.get('ms_per_signal_s'))}`")
+            dlines.append("- Note: This value is derived from the measured inference mean and the runtime-derived input duration.")
+
+        dlines.append(
+            f"- **CPU util mean (aggregate %)**: `{_fmt(core.get('cpu_mean_pct'))}` "
+            f"(≈ `{_fmt_cores_equiv(core.get('cpu_mean_pct'))}` cores)"
+        )
+        dlines.append(
+            f"- **CPU util p95 (aggregate %)**: `{_fmt(core.get('cpu_p95_pct'))}` "
+            f"(≈ `{_fmt_cores_equiv(core.get('cpu_p95_pct'))}` cores)"
+        )
+
+        dlines.append(f"- **RSS peak inference (MB)**: `{_fmt_mb_from_bytes(core.get('rss_peak_infer_bytes'))}`")
+        dlines.append(f"- **RSS peak (MB)**: `{_fmt_mb_from_bytes(core.get('rss_peak_bytes'))}`")
         # Make model-specific runtime memory requirements explicit (optional fields)
-        dlines.append(f"- **RSS baseline mean (bytes)**: `{_fmt(core.get('rss_baseline_mean_bytes'))}`")
-        dlines.append(f"- **RSS mean during inference (bytes)**: `{_fmt(core.get('rss_mean_infer_bytes'))}`")
-        dlines.append(f"- **Model-specific runtime memory (bytes)**: `{_fmt(core.get('model_specific_runtime_memory_bytes'))}`")
+        dlines.append(f"- **RSS baseline mean (MB)**: `{_fmt_mb_from_bytes(core.get('rss_baseline_mean_bytes'))}`")
+        dlines.append(f"- **RSS mean during inference (MB)**: `{_fmt_mb_from_bytes(core.get('rss_mean_infer_bytes'))}`")
+        dlines.append(f"- **Model-specific runtime memory (MB)**: `{_fmt_mb_from_bytes(core.get('model_specific_runtime_memory_bytes'))}`")
         dlines.append(f"- **Memory safety margin (%)**: `{_fmt(core.get('memory_safety_margin_pct'))}`")
-        dlines.append(f"- **Recommended minimum RAM (bytes)**: `{_fmt(core.get('minimal_required_ram_bytes'))}`")
+        dlines.append(f"- **Recommended minimum RAM (MB)**: `{_fmt_mb_from_bytes(core.get('minimal_required_ram_bytes'))}`")
+        dlines.append(f"- **Recommended minimum RAM (GB)**: `{_fmt_gb_from_bytes(core.get('minimal_required_ram_bytes'))}`")
         if core.get("memory_recommendation") is not None:
             dlines.append(f"- **Memory recommendation**: `{_fmt(core.get('memory_recommendation'))}`")
- 
+
         dlines.append("\n## Config\n")
         if cfg.get("input"):
             dlines.append(f"- **Input**: `{_fmt(cfg.get('input'))}`")
