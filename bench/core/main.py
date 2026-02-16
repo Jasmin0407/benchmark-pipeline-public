@@ -244,12 +244,22 @@ def main(
     for dev, measure_results in results_per_device:
         mem = measure_results.get("memory")
 
+        # Prefer runtime-derived input facts to avoid drifting away from what was actually benchmarked.
+        actual_input_shape = measure_results.get("actual_input_shape") or cfg["input"]["shape"]
+        input_fs_hz = measure_results.get("input_fs_hz")
+        input_num_samples = measure_results.get("input_num_samples")
+        input_duration_s = measure_results.get("input_duration_s")
+        ms_per_signal_s = measure_results.get("ms_per_signal_s")
+
         run = RunSchema(
             meta=MetaSchema(framework=backend, device_target=dev),
             model=ModelSchema(
                 path=cfg["model"]["path"],
-                input_shape=cfg["input"]["shape"],
+                input_shape=actual_input_shape,
                 dtype=cfg["model"].get("dtype", "fp32"),
+                fs_hz=input_fs_hz,
+                input_num_samples=input_num_samples,
+                input_duration_s=input_duration_s,
                 parameters=size_result.get("parameters_total"),
                 size_on_disk_bytes=size_result.get("total_on_disk_bytes"),
             ),
@@ -259,6 +269,7 @@ def main(
                 throughput_sps=measure_results.get("throughput_sps"),
                 cpu_utilization_pct=measure_results.get("cpu_utilization_pct"),
                 memory=mem,
+                ms_per_signal_s=ms_per_signal_s,
             ),
             hardware=hardware_schema,
             env=env_schema,
