@@ -79,6 +79,10 @@ class MeasureController:
         self.pre_roll_s = float(_deep_get(cfg, ["metrics", "pre_roll_s"], 5.0))
         self.post_delay_s = float(_deep_get(cfg, ["metrics", "post_delay_s"], 2.0))
         self.memory_mode = str(_deep_get(cfg, ["metrics", "memory_mode"], "static")).lower()
+        # Optional: separate inference window for dynamic memory mode.
+        # If absent, MemoryMeter keeps legacy behavior (infer window == pre_roll_s).
+        dyn_infer = _deep_get(cfg, ["metrics", "dynamic_infer_s"], None)
+        self.dynamic_infer_s = None if dyn_infer is None else float(dyn_infer)
 
         if self.memory_mode not in ("static", "dynamic"):
             raise ValueError("memory_mode must be 'static' or 'dynamic'")
@@ -272,6 +276,7 @@ class MeasureController:
                 pre_roll_s=self.pre_roll_s,
                 post_delay_s=self.post_delay_s,
                 mode=self.memory_mode,
+                dynamic_infer_s=self.dynamic_infer_s,
             )
         finally:
             self.cpu_meter.stop()

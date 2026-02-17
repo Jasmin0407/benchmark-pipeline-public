@@ -185,6 +185,7 @@ class MemoryMeter:
         pre_roll_s: float = 5.0,
         post_delay_s: float = 2.0,
         mode: str = "static",
+        dynamic_infer_s: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Measure RSS over time around an inference function.
@@ -207,8 +208,11 @@ class MemoryMeter:
                 - sample post-delay
             "dynamic":
                 - sample pre-roll
-                - run fn in a loop for ~pre_roll_s seconds while sampling
+                - run fn in a loop for a fixed inference window while sampling
                 - sample post-delay
+        dynamic_infer_s:
+            Optional inference window duration for "dynamic" mode (seconds).
+            If None, falls back to the legacy behavior: use pre_roll_s.
 
         Returns
         -------
@@ -221,6 +225,11 @@ class MemoryMeter:
         repeats = max(1, int(repeats))
         pre_roll_s = max(0.0, float(pre_roll_s))
         post_delay_s = max(0.0, float(post_delay_s))
+
+        # In dynamic mode, allow a separate inference window duration.
+        # Backward-compatible default: legacy behavior was "infer for ~pre_roll_s seconds".
+        if dynamic_infer_s is not None:
+            dynamic_infer_s = max(0.0, float(dynamic_infer_s))
 
         self.samples_rss.clear()
         timestamps: list[float] = []
@@ -263,9 +272,12 @@ class MemoryMeter:
 
             infer_start_idx = len(self.samples_rss)
 
-            # 2) Inference loop for ~pre_roll_s seconds while sampling
+            # 2) Inference loop for a fixed window while sampling.
+            # Use dynamic_infer_s if provided; otherwise keep legacy behavior (pre_roll_s).
+            infer_window_s = pre_roll_s if dynamic_infer_s is None else dynamic_infer_s
+
             t_inf0 = time.perf_counter()
-            t_end = t_inf0 + pre_roll_s
+            t_end = t_inf0 + infer_window_s
             next_tick = time.perf_counter()
 
             while time.perf_counter() < t_end:
@@ -290,7 +302,7 @@ class MemoryMeter:
             self._run_sampling_window(post_delay_s, interval_s, t0, timestamps)
 
         # Shift time axis so inference start ~ 0 (pre-roll becomes negative)
-        # We use the requested pre_roll_s as the offset for a stable convention.
+        # Convention: we keep pre_roll_s as the offset (baseline is always [-pre_roll_s, 0]).
         timestamps_shifted = [float(t - pre_roll_s) for t in timestamps]
 
         self._rss_end = self._sample_rss()
@@ -337,6 +349,9 @@ class MemoryMeter:
             "sample_hz": int(self.sample_hz),
             "mode": str(mode),
         }
+        # Optional: expose configured inference window for audit (only if provided).
+        if mode == "dynamic" and dynamic_infer_s is not None:
+            result["dynamic_infer_s"] = float(dynamic_infer_s)
 
         # Optional GPU memory block (best-effort)
         gpu_used = self._read_gpu_bytes()
