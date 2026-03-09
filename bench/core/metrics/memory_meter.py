@@ -4,20 +4,18 @@ MemoryMeter
 Measures host RAM usage (RSS) over time and reports:
 - start/end/peak RSS
 - RSS delta (total and inference-window)
-- RSS time series + timestamps aligned to a common time axis
+- RSS time series + timestamps aligned to the true inference start
 
 Supports an optional post-delay window to capture memory settling after inference.
 
-Notes
------
-- Timestamps use time.perf_counter() and are shifted so that t=0 corresponds to the start
-  of the inference phase (pre-roll is negative time).
-- GPU memory sampling is optional:
-  - Prefer NVML (pynvml) if available (lazy import + one-time init per instance).
-  - Fall back to torch.cuda.* if PyTorch is available and CUDA is enabled.
-- infer_start_idx / infer_end_idx follow Python slicing semantics:
-  - infer_start_idx is inclusive
-  - infer_end_idx is exclusive
+Design notes
+------------
+- ``time.perf_counter()`` is the canonical source for duration fields.
+- Sample timestamps are preserved for diagnostics, plots, and audit trails, but they
+  are not used as the primary source of truth for exported durations.
+- ``infer_start_idx`` / ``infer_end_idx`` follow Python slicing semantics:
+  - ``infer_start_idx`` is inclusive
+  - ``infer_end_idx`` is exclusive
 """
 
 from __future__ import annotations
@@ -74,6 +72,7 @@ class MemoryMeter:
             return self._pynvml
         try:
             import pynvml  # local import by design
+
             self._pynvml = pynvml
             return self._pynvml
         except Exception:
@@ -108,17 +107,15 @@ class MemoryMeter:
 
         Returns None if unavailable.
         """
-        # 1) NVML preferred
         if self._ensure_nvml_initialized():
             try:
                 pynvml = self._pynvml
-                h = pynvml.nvmlDeviceGetHandleByIndex(self.gpu_index)
-                mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+                handle = pynvml.nvmlDeviceGetHandleByIndex(self.gpu_index)
+                mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
                 return int(mem.used)
             except Exception:
                 pass
 
-        # 2) Torch fallback: process allocator usage
         if torch is not None and torch.cuda.is_available():
             try:
                 return int(torch.cuda.memory_allocated())
@@ -152,8 +149,8 @@ class MemoryMeter:
         self,
         duration_s: float,
         interval_s: float,
-        t0: float,
-        timestamps: list[float],
+        t0_perf: float,
+        timestamps_raw_s: list[float],
     ) -> None:
         """
         Sample RSS for a fixed duration using a drift-corrected schedule.
@@ -162,11 +159,11 @@ class MemoryMeter:
         end_time = next_tick + max(0.0, float(duration_s))
 
         while time.perf_counter() < end_time:
-            now = time.perf_counter()
+            now_perf = time.perf_counter()
             rss = self._sample_rss()
 
             self.samples_rss.append(rss)
-            timestamps.append(float(now - t0))
+            timestamps_raw_s.append(float(now_perf - t0_perf))
 
             if rss > self._rss_peak:
                 self._rss_peak = rss
@@ -190,34 +187,11 @@ class MemoryMeter:
         """
         Measure RSS over time around an inference function.
 
-        Parameters
-        ----------
-        fn:
-            Callable to execute (e.g., model inference).
-        repeats:
-            Number of repeated executions of fn in static mode.
-        pre_roll_s:
-            Seconds to sample before inference.
-        post_delay_s:
-            Seconds to sample after inference ends.
-        mode:
-            "static":
-                - sample pre-roll
-                - run fn 'repeats' times (no continuous sampling inside)
-                - sample at least once at inference end
-                - sample post-delay
-            "dynamic":
-                - sample pre-roll
-                - run fn in a loop for a fixed inference window while sampling
-                - sample post-delay
-        dynamic_infer_s:
-            Optional inference window duration for "dynamic" mode (seconds).
-            If None, falls back to the legacy behavior: use pre_roll_s.
-
-        Returns
-        -------
-        Dict[str, Any]
-            Memory measurement block.
+        Duration semantics
+        ------------------
+        ``inference_duration_s`` and ``duration_s`` are derived from ``time.perf_counter()``
+        and therefore remain stable even if the sampler is coarse or slightly phase-shifted.
+        ``timestamps_s`` and ``timestamps_raw_s`` are retained for plots and audits.
         """
         if mode not in ("static", "dynamic"):
             raise ValueError("mode must be 'static' or 'dynamic'")
@@ -226,91 +200,84 @@ class MemoryMeter:
         pre_roll_s = max(0.0, float(pre_roll_s))
         post_delay_s = max(0.0, float(post_delay_s))
 
-        # In dynamic mode, allow a separate inference window duration.
-        # Backward-compatible default: legacy behavior was "infer for ~pre_roll_s seconds".
         if dynamic_infer_s is not None:
             dynamic_infer_s = max(0.0, float(dynamic_infer_s))
 
         self.samples_rss.clear()
-        timestamps: list[float] = []
+        timestamps_raw_s: list[float] = []
 
         self._rss_start = self._sample_rss()
         self._rss_peak = self._rss_start
 
         interval_s = 1.0 / max(float(self.sample_hz), 1.0)
+        t0_perf = time.perf_counter()
 
-        # Global time origin
-        t0 = time.perf_counter()
+        infer_start_idx = 0
+        infer_end_idx = 0
+        infer_start_perf = t0_perf
+        infer_end_perf = t0_perf
 
         if mode == "static":
-            # 1) Pre-roll sampling
-            self._run_sampling_window(pre_roll_s, interval_s, t0, timestamps)
+            self._run_sampling_window(pre_roll_s, interval_s, t0_perf, timestamps_raw_s)
 
             infer_start_idx = len(self.samples_rss)
+            infer_start_perf = time.perf_counter()
 
-            # 2) Inference block
-            t_inf0 = time.perf_counter()
             for _ in range(repeats):
                 fn()
-            t_inf1 = time.perf_counter()
-            inference_duration_s = float(t_inf1 - t_inf0)
 
-            # Ensure we have at least one sample at inference end
+            infer_end_perf = time.perf_counter()
+            inference_duration_s = float(max(0.0, infer_end_perf - infer_start_perf))
+
             rss_end_inf = self._sample_rss()
             self.samples_rss.append(rss_end_inf)
-            timestamps.append(float(time.perf_counter() - t0))
+            timestamps_raw_s.append(float(time.perf_counter() - t0_perf))
             self._rss_peak = max(self._rss_peak, rss_end_inf)
 
-            infer_end_idx = len(self.samples_rss)  # exclusive
-
-            # 3) Post-delay sampling
-            self._run_sampling_window(post_delay_s, interval_s, t0, timestamps)
+            infer_end_idx = len(self.samples_rss)
+            self._run_sampling_window(post_delay_s, interval_s, t0_perf, timestamps_raw_s)
 
         else:
-            # 1) Pre-roll sampling
-            self._run_sampling_window(pre_roll_s, interval_s, t0, timestamps)
+            self._run_sampling_window(pre_roll_s, interval_s, t0_perf, timestamps_raw_s)
 
             infer_start_idx = len(self.samples_rss)
-
-            # 2) Inference loop for a fixed window while sampling.
-            # Use dynamic_infer_s if provided; otherwise keep legacy behavior (pre_roll_s).
             infer_window_s = pre_roll_s if dynamic_infer_s is None else dynamic_infer_s
 
-            t_inf0 = time.perf_counter()
-            t_end = t_inf0 + infer_window_s
+            infer_start_perf = time.perf_counter()
+            infer_end_target = infer_start_perf + infer_window_s
             next_tick = time.perf_counter()
 
-            while time.perf_counter() < t_end:
+            while time.perf_counter() < infer_end_target:
                 fn()
 
-                # Sample once per tick (drift-corrected)
-                now = time.perf_counter()
+                now_perf = time.perf_counter()
                 rss = self._sample_rss()
                 self.samples_rss.append(rss)
-                timestamps.append(float(now - t0))
+                timestamps_raw_s.append(float(now_perf - t0_perf))
                 self._rss_peak = max(self._rss_peak, rss)
 
                 next_tick += interval_s
                 sleep_time = max(0.0, next_tick - time.perf_counter())
                 time.sleep(sleep_time)
 
-            t_inf1 = time.perf_counter()
-            inference_duration_s = float(t_inf1 - t_inf0)
-            infer_end_idx = len(self.samples_rss)  # exclusive
+            infer_end_perf = time.perf_counter()
+            inference_duration_s = float(max(0.0, infer_end_perf - infer_start_perf))
+            infer_end_idx = len(self.samples_rss)
 
-            # 3) Post-delay sampling
-            self._run_sampling_window(post_delay_s, interval_s, t0, timestamps)
+            self._run_sampling_window(post_delay_s, interval_s, t0_perf, timestamps_raw_s)
 
-        # Shift time axis so inference start ~ 0 (pre-roll becomes negative)
-        # Convention: we keep pre_roll_s as the offset (baseline is always [-pre_roll_s, 0]).
-        timestamps_shifted = [float(t - pre_roll_s) for t in timestamps]
+        measure_end_perf = time.perf_counter()
+        duration_s = float(max(0.0, measure_end_perf - t0_perf))
+
+        infer_start_time_raw_s = float(max(0.0, infer_start_perf - t0_perf))
+        infer_end_time_raw_s = float(max(infer_start_time_raw_s, infer_end_perf - t0_perf))
+
+        timestamps_s = [float(ts - infer_start_time_raw_s) for ts in timestamps_raw_s]
 
         self._rss_end = self._sample_rss()
         rss_delta = int(self._rss_end - self._rss_start)
-
         rss_array = np.asarray(self.samples_rss, dtype=float)
 
-        # Inference-window peak and delta (best-effort even with few samples)
         if infer_start_idx < len(rss_array):
             slice_end = min(infer_end_idx, len(rss_array))
             rss_slice = rss_array[infer_start_idx:slice_end]
@@ -324,13 +291,6 @@ class MemoryMeter:
             rss_peak_inference = float(self._rss_peak)
             rss_delta_inference = 0.0
 
-        # Prefer duration derived from timestamp axis (stable export metadata)
-        duration_s = 0.0
-        if len(timestamps_shifted) >= 2:
-            duration_s = float(timestamps_shifted[-1] - timestamps_shifted[0])
-        if duration_s <= 0:
-            duration_s = float(time.perf_counter() - t0)
-
         result: Dict[str, Any] = {
             "rss_start_bytes": int(self._rss_start),
             "rss_end_bytes": int(self._rss_end),
@@ -338,22 +298,28 @@ class MemoryMeter:
             "rss_peak_bytes": int(self._rss_peak),
             "rss_peak_inference_bytes": float(rss_peak_inference),
             "rss_delta_inference_bytes": float(rss_delta_inference),
-            "duration_s": float(round(duration_s, 3)),
+            "duration_s": float(round(duration_s, 6)),
+            "duration_source": "perf_counter",
             "pre_roll_s": float(pre_roll_s),
-            "inference_duration_s": float(round(inference_duration_s, 3)),
+            "inference_duration_s": float(round(inference_duration_s, 6)),
+            "inference_duration_source": "perf_counter",
             "post_delay_s": float(post_delay_s),
             "infer_start_idx": int(infer_start_idx),
             "infer_end_idx": int(infer_end_idx),
+            "infer_start_time_raw_s": float(round(infer_start_time_raw_s, 6)),
+            "infer_end_time_raw_s": float(round(infer_end_time_raw_s, 6)),
+            "infer_start_time_s": 0.0,
+            "infer_end_time_s": float(round(inference_duration_s, 6)),
             "rss_samples": list(self.samples_rss),
-            "timestamps_s": list(timestamps_shifted),
+            "timestamps_raw_s": [float(round(ts, 6)) for ts in timestamps_raw_s],
+            "timestamps_s": [float(round(ts, 6)) for ts in timestamps_s],
             "sample_hz": int(self.sample_hz),
             "mode": str(mode),
         }
-        # Optional: expose configured inference window for audit (only if provided).
+
         if mode == "dynamic" and dynamic_infer_s is not None:
             result["dynamic_infer_s"] = float(dynamic_infer_s)
 
-        # Optional GPU memory block (best-effort)
         gpu_used = self._read_gpu_bytes()
         gpu_peak = self._read_gpu_peak()
         if gpu_used is not None or gpu_peak is not None:

@@ -1,4 +1,3 @@
-# bench/core/measure/measure_controller.py
 from __future__ import annotations
 """
 MeasureController
@@ -14,32 +13,34 @@ Single source of truth for iteration counts:
 - run.repeats
 """
 
+import os
 from time import sleep
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from bench.core.metrics.timing_meter import TimingMeter
 from bench.core.metrics.cpu_meter import CpuMeter
-from bench.core.metrics.memory_meter import MemoryMeter
 from bench.core.metrics.gpu_meter_jetson import JetsonGpuMeter
+from bench.core.metrics.memory_meter import MemoryMeter
+from bench.core.metrics.timing_meter import TimingMeter
+
+
+THREAD_ENV_KEYS = (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
 
 
 def _deep_get(cfg: Dict[str, Any], keys: List[str], default: Any) -> Any:
-    """
-    Robust config getter:
-    - Try nested access (e.g., ["run", "warmups"])
-    - Fall back to flat keys for backward compatibility (best-effort)
-
-    This keeps the controller resilient while you migrate schemas.
-    """
+    """Robust config getter with nested-first and legacy flat-key fallback."""
     cur: Any = cfg
     try:
-        for k in keys:
-            cur = cur[k]
+        for key in keys:
+            cur = cur[key]
         return cur
     except Exception:
-        # Flat fallbacks (legacy compatibility)
         flat_candidates = [
             keys[-1],
             "sampler_hz" if keys[-1] == "sampler_hz" else None,
@@ -49,68 +50,125 @@ def _deep_get(cfg: Dict[str, Any], keys: List[str], default: Any) -> Any:
             "repeats" if keys[-1] == "repeats" else None,
             "memory_mode" if keys[-1] == "memory_mode" else None,
         ]
-        for cand in flat_candidates:
-            if cand and cand in cfg:
-                return cfg[cand]
+        for candidate in flat_candidates:
+            if candidate and candidate in cfg:
+                return cfg[candidate]
         return default
 
 
 class MeasureController:
-    """
-    Executes standardized benchmark measurements in a reproducible way.
-
-    Expected runner API:
-    - load()
-    - prepare(input_spec) -> dummy_input
-    - warmup(n, input_spec)
-    - infer(dummy_input)
-    - teardown()
-    """
+    """Execute standardized benchmark measurements in a reproducible way."""
 
     def __init__(self, cfg: Dict[str, Any]):
         self.cfg = cfg
-
-        # Unified schema: run.warmups / run.repeats
         self.sample_hz = int(_deep_get(cfg, ["metrics", "sampler_hz"], 75))
         self.warmups = int(_deep_get(cfg, ["run", "warmups"], 10))
         self.repeats = int(_deep_get(cfg, ["run", "repeats"], 100))
 
-        # Memory meter configuration
         self.pre_roll_s = float(_deep_get(cfg, ["metrics", "pre_roll_s"], 5.0))
         self.post_delay_s = float(_deep_get(cfg, ["metrics", "post_delay_s"], 2.0))
         self.memory_mode = str(_deep_get(cfg, ["metrics", "memory_mode"], "static")).lower()
-        # Optional: separate inference window for dynamic memory mode.
-        # If absent, MemoryMeter keeps legacy behavior (infer window == pre_roll_s).
         dyn_infer = _deep_get(cfg, ["metrics", "dynamic_infer_s"], None)
         self.dynamic_infer_s = None if dyn_infer is None else float(dyn_infer)
 
         if self.memory_mode not in ("static", "dynamic"):
             raise ValueError("memory_mode must be 'static' or 'dynamic'")
 
-        # Meters
-        # IMPORTANT: TimingMeter performs warmups + repeats internally in one call.
         self.timing_meter = TimingMeter(warmups=self.warmups, repeats=self.repeats)
         self.cpu_meter = CpuMeter(sample_hz=self.sample_hz)
         self.mem_meter = MemoryMeter(sample_hz=self.sample_hz)
 
-        # Optional Jetson GPU Meter (best-effort). Use lower hz for slower sampling overhead.
         gpu_hz_cfg = _deep_get(cfg, ["metrics", "gpu_sampler_hz"], min(self.sample_hz, 10))
         self.gpu_meter = JetsonGpuMeter(sample_hz=int(gpu_hz_cfg))
 
-    def run_benchmark(self, runner, dummy_input: Optional[Any] = None) -> Dict[str, Any]:
-        """
-        Run a full benchmark cycle and return a serializable result dict.
+    def _resolve_duration_fields(self, mem_result: Dict[str, Any]) -> Dict[str, Any]:
+        timestamps = mem_result.get("timestamps_s") or []
+        i0 = int(mem_result.get("infer_start_idx", 0) or 0)
+        i1 = int(mem_result.get("infer_end_idx", 0) or 0)
 
-        Returns a top-level structure for existing callers plus an adapter "metrics" block.
-        """
-        # ------------------------------------------------------------------
-        # 1) Prepare dummy input (deterministic input spec)
-        # ------------------------------------------------------------------
+        inference_duration_s = float(mem_result.get("inference_duration_s", 0.0) or 0.0)
+        inference_duration_source = str(
+            mem_result.get("inference_duration_source") or ("perf_counter" if inference_duration_s > 0 else "")
+        )
+
+        duration_s = float(mem_result.get("duration_s", 0.0) or 0.0)
+        duration_source = str(mem_result.get("duration_source") or ("perf_counter" if duration_s > 0 else ""))
+
+        if inference_duration_s <= 0.0 and isinstance(timestamps, (list, tuple)) and len(timestamps) >= 2:
+            i0 = max(0, min(i0, len(timestamps) - 1))
+            i1 = max(i0, min(i1, len(timestamps) - 1))
+            inference_duration_s = float(max(0.0, timestamps[i1] - timestamps[i0]))
+            inference_duration_source = "timestamps"
+
+        if duration_s <= 0.0:
+            if isinstance(timestamps, (list, tuple)) and len(timestamps) >= 2:
+                duration_s = float(max(0.0, timestamps[-1] - timestamps[0]))
+                duration_source = "timestamps"
+            else:
+                pre = float(mem_result.get("pre_roll_s", self.pre_roll_s) or 0.0)
+                post = float(mem_result.get("post_delay_s", self.post_delay_s) or 0.0)
+                duration_s = float(max(0.0, pre + inference_duration_s + post))
+                duration_source = "fallback_sum"
+
+        return {
+            "inference_duration_s": float(inference_duration_s),
+            "inference_duration_source": inference_duration_source or "unknown",
+            "duration_s": float(duration_s),
+            "duration_source": duration_source or "unknown",
+        }
+
+    def _build_thread_config(self, runner: Any) -> Dict[str, Any]:
+        requested_threads_raw = _deep_get(self.cfg, ["run", "threads"], None)
+        requested_threads = None if requested_threads_raw in (None, "") else int(requested_threads_raw)
+
+        requested_inter_op_raw = _deep_get(self.cfg, ["run", "inter_op_threads"], None)
+        requested_inter_op = None if requested_inter_op_raw in (None, "") else int(requested_inter_op_raw)
+
+        thread_env = {key: os.environ.get(key) for key in THREAD_ENV_KEYS}
+        runner_thread_audit = getattr(runner, "get_thread_audit", None)
+        runner_audit = runner_thread_audit() if callable(runner_thread_audit) else {}
+
+        note = (
+            "Requested thread settings describe intended backend configuration. "
+            "Observed CPU parallelism may be higher or lower depending on runtime behavior, "
+            "kernel libraries, provider internals, and environment variables."
+        )
+
+        return {
+            "requested_threads": requested_threads,
+            "requested_inter_op_threads": requested_inter_op,
+            "backend_thread_control_supported": runner_audit.get("backend_thread_control_supported", False),
+            "applied_intra_op_threads": runner_audit.get("applied_intra_op_threads"),
+            "applied_inter_op_threads": runner_audit.get("applied_inter_op_threads"),
+            "execution_mode": runner_audit.get("execution_mode"),
+            "thread_env": thread_env,
+            "provider_chain": runner_audit.get("provider_chain"),
+            "active_provider": runner_audit.get("active_provider"),
+            "fallback_occurred": runner_audit.get("fallback_occurred"),
+            "note": note,
+        }
+
+    @staticmethod
+    def _build_cpu_audit_consistency_note(cpu_result: Dict[str, Any]) -> str:
+        cpu_time = cpu_result.get("cpu_time") or {}
+        cpu_core_util = cpu_time.get("cpu_core_util")
+        sampled_cores = cpu_result.get("core_util_mean_cores")
+
+        if cpu_core_util is None or sampled_cores is None:
+            return "insufficient_data"
+
+        diff = abs(float(sampled_cores) - float(cpu_core_util))
+        if diff <= 0.35:
+            return "plausible_agreement"
+        if diff <= 1.0:
+            return "mild_deviation"
+        return "investigate_mismatch"
+
+    def run_benchmark(self, runner, dummy_input: Optional[Any] = None) -> Dict[str, Any]:
         if dummy_input is None:
             input_spec = _deep_get(self.cfg, ["input"], {}) or {}
             dummy_input = runner.prepare(input_spec)
         else:
-            # If the caller supplies dummy_input, derive input_spec from it
             if isinstance(dummy_input, dict):
                 arr = next(iter(dummy_input.values()))
             else:
@@ -120,48 +178,25 @@ class MeasureController:
             if dtype_str.startswith("torch."):
                 dtype_str = dtype_str.replace("torch.", "")
 
-            input_spec = {
-                "shape": list(getattr(arr, "shape", [])),
-                "dtype": dtype_str,
-            }
+            input_spec = {"shape": list(getattr(arr, "shape", [])), "dtype": dtype_str}
 
-        # Determine batch size from input shape (best-effort)
         batch_size = 1
         try:
-            shp = input_spec.get("shape")
-            if isinstance(shp, list) and len(shp) >= 1:
-                b = int(shp[0])
-                batch_size = b if b > 0 else 1
+            shape = input_spec.get("shape")
+            if isinstance(shape, list) and len(shape) >= 1:
+                batch_size = max(1, int(shape[0]))
         except Exception:
             batch_size = 1
 
-        # ------------------------------------------------------------------
-        # Best-effort input length extraction (audit-friendly)
-        # ------------------------------------------------------------------
-        # Source of truth:
-        # 1) The actual input object passed to runner.infer(...)
-        # 2) Fallback to config shape/fs_hz if runtime shape is unavailable
         actual_input_shape: Optional[List[int]] = None
         input_num_samples: Optional[int] = None
 
-        # Try to locate the first tensor/array-like object (dict[str, arr] or plain arr).
         try:
-            if isinstance(dummy_input, dict) and dummy_input:
-                arr_any = next(iter(dummy_input.values()))
-            else:
-                arr_any = dummy_input
-
-            shp_any = getattr(arr_any, "shape", None)
-            if shp_any is not None:
-                actual_input_shape = list(shp_any)  # type: ignore[arg-type]
+            arr_any = next(iter(dummy_input.values())) if isinstance(dummy_input, dict) and dummy_input else dummy_input
+            shape_any = getattr(arr_any, "shape", None)
+            if shape_any is not None:
+                actual_input_shape = list(shape_any)
                 if len(actual_input_shape) >= 1:
-                    # Convention for ECG-like signals is often [B, C, N] where the last
-                    # dimension corresponds to time samples. Some exported models use
-                    # other layouts (e.g. [B, N, C]).
-                    #
-                    # To keep this audit-friendly and minimal, allow overriding the sample
-                    # axis via config:
-                    #   input.samples_axis: <int>   (default: -1)
                     samples_axis = -1
                     try:
                         inp_cfg = _deep_get(self.cfg, ["input"], {}) or {}
@@ -178,17 +213,14 @@ class MeasureController:
                         if isinstance(n_dim, (int, np.integer)) and int(n_dim) > 0:
                             input_num_samples = int(n_dim)
         except Exception:
-            # Keep None on extraction failure. We will fall back to config below.
             actual_input_shape = None
             input_num_samples = None
 
-        # Fallback: config-defined shape if runtime extraction is unavailable.
         if actual_input_shape is None:
-            shp_cfg = input_spec.get("shape")
-            if isinstance(shp_cfg, list) and shp_cfg:
-                actual_input_shape = [int(x) for x in shp_cfg if isinstance(x, (int, float, np.integer))]
+            shape_cfg = input_spec.get("shape")
+            if isinstance(shape_cfg, list) and shape_cfg:
+                actual_input_shape = [int(x) for x in shape_cfg if isinstance(x, (int, float, np.integer))]
 
-        # Sampling rate fallback (for input duration in seconds).
         fs_hz: Optional[float] = None
         try:
             fs_val = None
@@ -206,25 +238,15 @@ class MeasureController:
         if input_num_samples is not None and fs_hz is not None and fs_hz > 0:
             input_duration_s = float(input_num_samples) / float(fs_hz)
 
-        # ------------------------------------------------------------------
-        # 2) Runner warmup (explicit)
-        # ------------------------------------------------------------------
-        # Keep this warmup because runners might need setup / compilation.
-        # This warmup is separate from TimingMeter warmups which are focused on timing stability.
         runner.warmup(self.warmups, input_spec)
         sleep(0.2)
 
-        # ------------------------------------------------------------------
-        # 3) Latency measurement (single TimingMeter call)
-        # ------------------------------------------------------------------
         self.timing_meter.reset()
 
         def _infer_once() -> None:
             runner.infer(dummy_input)
 
         timing_stats = self.timing_meter.measure(_infer_once)
-
-        # Normalize for your downstream schema expectations
         stats = {
             "mean": float(timing_stats.get("mean") or 0.0),
             "p50": float(timing_stats.get("p50") or 0.0),
@@ -233,34 +255,17 @@ class MeasureController:
             "p99": float(timing_stats.get("p99") or 0.0),
             "samples": list(timing_stats.get("samples") or []),
         }
-
-        # -------------------------------------------------
-        # Per-sample normalization
-        # -------------------------------------------------
-        # The TimingMeter measures latency per inference call. If the input has batch_size > 1,
-        # the measured mean corresponds to "ms per batch". For fair cross-hardware/model comparison
-        # we also report "ms per sample" by dividing by batch_size.
         stats["batch_size"] = int(batch_size)
 
         mean_ms = stats["mean"]
-        if mean_ms > 0 and batch_size > 0:
-            stats["mean_per_sample"] = float(mean_ms / float(batch_size))
-        else:
-            # Keep explicit None instead of 0.0 when normalization is undefined.
-            stats["mean_per_sample"] = None
-
+        stats["mean_per_sample"] = float(mean_ms / float(batch_size)) if mean_ms > 0 and batch_size > 0 else None
         throughput_ips = (1000.0 / mean_ms) if mean_ms > 0 else None
         throughput_sps = (throughput_ips * batch_size) if throughput_ips is not None else None
 
-        # Optional signal-normalized latency (ms per second of input signal).
-        # This is only meaningful if we can reliably infer input_duration_s.
         ms_per_signal_s: Optional[float] = None
         if input_duration_s is not None and input_duration_s > 0 and mean_ms > 0:
             ms_per_signal_s = float(mean_ms) / float(input_duration_s)
 
-        # ------------------------------------------------------------------
-        # 4) Memory + aligned CPU/GPU monitoring (single inference block)
-        # ------------------------------------------------------------------
         def _measure_once() -> None:
             runner.infer(dummy_input)
 
@@ -288,35 +293,18 @@ class MeasureController:
         cpu_result = self.cpu_meter.summary(
             infer_start_idx=mem_result.get("infer_start_idx", 0),
             infer_end_idx=mem_result.get("infer_end_idx", 0),
+            scope="inference_window",
+            scope_label="cpu_inference_window",
         )
+        cpu_result["cpu_audit_consistency_note"] = self._build_cpu_audit_consistency_note(cpu_result)
 
-        # ------------------------------------------------------------------
-        # 5) Duration calculations (consistent exported values)
-        # ------------------------------------------------------------------
-        timestamps = mem_result.get("timestamps_s") or []
-        i0 = int(mem_result.get("infer_start_idx", 0) or 0)
-        i1 = int(mem_result.get("infer_end_idx", 0) or 0)
+        duration_fields = self._resolve_duration_fields(mem_result)
 
-        inference_duration_s = 0.0
-        if isinstance(timestamps, (list, tuple)) and len(timestamps) >= 2:
-            i0 = max(0, min(i0, len(timestamps) - 1))
-            i1 = max(i0, min(i1, len(timestamps) - 1))
-            inference_duration_s = float(timestamps[i1] - timestamps[i0])
-
-        duration_s = 0.0
-        if isinstance(timestamps, (list, tuple)) and len(timestamps) >= 2:
-            duration_s = float(timestamps[-1] - timestamps[0])
-        else:
-            pre = float(mem_result.get("pre_roll_s", self.pre_roll_s) or 0.0)
-            post = float(mem_result.get("post_delay_s", self.post_delay_s) or 0.0)
-            total = pre + float(inference_duration_s) + post
-            duration_s = float(total) if total > 0 else 0.0
-
-        # Optional strict consistency check
         strict = bool(_deep_get(self.cfg, ["run", "strict_metrics"], False))
+        timestamps = mem_result.get("timestamps_s") or []
         meter_duration = float(mem_result.get("duration_s", 0.0) or 0.0)
         if isinstance(timestamps, (list, tuple)) and len(timestamps) >= 2:
-            ts_dur = float(timestamps[-1] - timestamps[0])
+            ts_dur = float(max(0.0, timestamps[-1] - timestamps[0]))
             if meter_duration > 0 and abs(ts_dur - meter_duration) > 0.25:
                 msg = (
                     "[WARN] memory duration mismatch: "
@@ -326,111 +314,106 @@ class MeasureController:
                     raise ValueError(msg)
                 print(msg)
 
-        # -------------------------------------------------
-        # Average RAM usage (overall and inference window)
-        # -------------------------------------------------
         rss_samples = mem_result.get("rss_samples") or []
         infer_start = int(mem_result.get("infer_start_idx", 0) or 0)
         infer_end = int(mem_result.get("infer_end_idx", 0) or 0)
 
         rss_mean_bytes = None
         rss_mean_inference_bytes = None
-
         if isinstance(rss_samples, (list, tuple)) and len(rss_samples) > 0:
             rss_mean_bytes = float(np.mean(rss_samples))
-
-            # Mean RAM during inference window only
             if 0 <= infer_start < infer_end <= len(rss_samples):
                 window = rss_samples[infer_start:infer_end]
                 if len(window) > 0:
                     rss_mean_inference_bytes = float(np.mean(window))
-        # -------------------------------------------------
-        # Derived, model-specific runtime memory metrics
-        # -------------------------------------------------
-        # Baseline is estimated from the pre-roll window (samples before inference starts).
-        # This is more stable than using a single rss_start_bytes snapshot.
+
         baseline_mean_bytes = None
         model_specific_runtime_memory_bytes = None
-
         if isinstance(rss_samples, (list, tuple)) and len(rss_samples) > 0:
             pre_end = max(0, min(infer_start, len(rss_samples)))
             pre_window = rss_samples[:pre_end]
             if len(pre_window) > 0:
                 baseline_mean_bytes = float(np.mean(pre_window))
-
-            # "Model-specific runtime memory" is the additional RAM during inference above baseline.
             if baseline_mean_bytes is not None and rss_mean_inference_bytes is not None:
                 delta = float(rss_mean_inference_bytes - baseline_mean_bytes)
                 model_specific_runtime_memory_bytes = float(max(0.0, delta))
 
-        # Safety margin for edge sizing (default 15%). Configurable via metrics.memory_safety_margin_pct.
         safety_margin_pct = float(_deep_get(self.cfg, ["metrics", "memory_safety_margin_pct"], 15.0))
         peak_infer = float(mem_result.get("rss_peak_inference_bytes", 0.0) or 0.0)
+        observed_peak_process_rss_bytes = float(mem_result.get("rss_peak_bytes", 0.0) or 0.0)
 
         minimal_required_ram_bytes = None
         if peak_infer > 0:
             minimal_required_ram_bytes = float(peak_infer * (1.0 + safety_margin_pct / 100.0))
 
-        # Human-readable recommendation (optional, useful for reports)
+        runtime_overhead_estimate_bytes = None
+        if observed_peak_process_rss_bytes > 0 and model_specific_runtime_memory_bytes is not None:
+            runtime_overhead_estimate_bytes = float(
+                max(0.0, observed_peak_process_rss_bytes - model_specific_runtime_memory_bytes)
+            )
+
+        memory_recommendation_scope = "observed_process_runtime"
         memory_recommendation = None
         if minimal_required_ram_bytes is not None:
             gib = minimal_required_ram_bytes / (1024.0 ** 3)
             memory_recommendation = (
-                f"Recommended minimum RAM: {gib:.2f} GiB "
-                f"(peak_inference_rss + {safety_margin_pct:.1f}% safety margin)."
+                f"Recommended empirical host RAM budget: {gib:.2f} GiB "
+                f"(observed inference-window RSS with {safety_margin_pct:.1f}% safety margin; "
+                "includes runtime and host-process overhead, not a hard model minimum)."
             )
 
+        memory_interpretation_note = (
+            "Process RSS metrics describe empirical benchmark-process memory observations. "
+            "They include runtime/framework overhead and should not be interpreted as a pure model-memory requirement."
+        )
 
-        # ------------------------------------------------------------------
-        # 6) Compact memory block (stable contract for JSON/schema)
-        # ------------------------------------------------------------------
         memory_block = {
             "rss_start_bytes": float(mem_result.get("rss_start_bytes", 0.0)),
             "rss_end_bytes": float(mem_result.get("rss_end_bytes", 0.0)),
-            "rss_peak_bytes": float(mem_result.get("rss_peak_bytes", 0.0)),
+            "rss_peak_bytes": observed_peak_process_rss_bytes,
             "rss_delta_bytes": float(mem_result.get("rss_delta_bytes", 0.0)),
             "rss_peak_inference_bytes": float(mem_result.get("rss_peak_inference_bytes", 0.0)),
             "rss_delta_inference_bytes": float(mem_result.get("rss_delta_inference_bytes", 0.0)),
-            # NEW: average RAM usage
             "rss_mean_bytes": rss_mean_bytes,
             "rss_mean_inference_bytes": rss_mean_inference_bytes,
-            # NEW: explicit, model-specific runtime memory requirements
             "rss_baseline_mean_bytes": baseline_mean_bytes,
             "model_specific_runtime_memory_bytes": model_specific_runtime_memory_bytes,
-            # NEW: edge sizing recommendation (peak + safety margin)
+            "runtime_overhead_estimate_bytes": runtime_overhead_estimate_bytes,
             "memory_safety_margin_pct": float(safety_margin_pct),
             "minimal_required_ram_bytes": minimal_required_ram_bytes,
-            "memory_recommendation": memory_recommendation, 
+            "memory_recommendation_scope": memory_recommendation_scope,
+            "memory_recommendation": memory_recommendation,
+            "memory_interpretation_note": memory_interpretation_note,
+            "observed_peak_process_rss_bytes": observed_peak_process_rss_bytes,
+            "observed_ram_estimate_bytes": minimal_required_ram_bytes,
             "pre_roll_s": float(mem_result.get("pre_roll_s", self.pre_roll_s)),
             "post_delay_s": float(mem_result.get("post_delay_s", self.post_delay_s)),
-            "inference_duration_s": float(inference_duration_s),
-            "duration_s": float(duration_s),
+            "inference_duration_s": float(duration_fields["inference_duration_s"]),
+            "inference_duration_source": duration_fields["inference_duration_source"],
+            "duration_s": float(duration_fields["duration_s"]),
+            "duration_source": duration_fields["duration_source"],
             "infer_start_idx": int(mem_result.get("infer_start_idx", 0)),
             "infer_end_idx": int(mem_result.get("infer_end_idx", 0)),
+            "infer_start_time_raw_s": mem_result.get("infer_start_time_raw_s"),
+            "infer_end_time_raw_s": mem_result.get("infer_end_time_raw_s"),
+            "infer_start_time_s": mem_result.get("infer_start_time_s"),
+            "infer_end_time_s": mem_result.get("infer_end_time_s"),
+            "timestamps_raw_s": mem_result.get("timestamps_raw_s", []),
             "timestamps_s": mem_result.get("timestamps_s", []),
             "rss_samples": mem_result.get("rss_samples", []),
             "sample_hz": float(mem_result.get("sample_hz", self.sample_hz)),
             "mode": mem_result.get("mode", self.memory_mode),
         }
 
-        # GPU utilization summary (if available)
-        gpu_util = None
-        if isinstance(gpu_block, dict):
-            gpu_util = gpu_block.get("gpu_utilization_pct")
+        gpu_util = gpu_block.get("gpu_utilization_pct") if isinstance(gpu_block, dict) else None
+        thread_config = self._build_thread_config(runner)
 
-        # ------------------------------------------------------------------
-        # 7) Return result dict (top-level + adapter block)
-        # ------------------------------------------------------------------
         return {
-            # Top-level keys used by existing callers (e.g., bench/core/main.py)
-            # Runtime-derived input facts (best-effort). These are the source of truth
-            # for downstream reporting, because runners may adapt shapes internally.
             "actual_input_shape": actual_input_shape,
             "input_num_samples": input_num_samples,
             "input_fs_hz": fs_hz,
             "input_duration_s": input_duration_s,
             "ms_per_signal_s": ms_per_signal_s,
-
             "timing_ms": stats,
             "throughput_bps": throughput_ips,
             "throughput_sps": throughput_sps,
@@ -438,13 +421,10 @@ class MeasureController:
             "gpu_utilization_pct": gpu_util,
             "jetson_gpu": gpu_block,
             "memory": memory_block,
-
-            # Adapter block (tests / schemas can rely on this)
+            "thread_config": thread_config,
             "metrics": {
                 "inference_time_ms": stats,
-                # Input-length aware additions (derived from the real dummy_input)
                 "ms_per_signal_s": ms_per_signal_s,
-
                 "throughput_sps": throughput_sps,
                 "cpu_utilization_pct": cpu_result,
                 "gpu_utilization_pct": gpu_util,

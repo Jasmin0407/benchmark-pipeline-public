@@ -65,7 +65,16 @@ class TorchRunner(BaseRunner):
         torch.set_num_threads(self.threads)
         map_loc = "cuda" if self._torch_device.type == "cuda" else "cpu"
 
-        obj = torch.load(self.model_path, map_location=map_loc)
+        try:
+            obj = torch.load(self.model_path, map_location=map_loc)
+        except Exception as exc:
+            message = str(exc)
+            # PyTorch 2.6 changed the default to weights_only=True. Many legacy test and
+            # benchmark artifacts in this repository store a full module object and therefore
+            # require an explicit trusted fallback.
+            if "Weights only load failed" not in message:
+                raise
+            obj = torch.load(self.model_path, map_location=map_loc, weights_only=False)
 
         # -------------------------------------------------------
         # Case 1: Full serialized model object

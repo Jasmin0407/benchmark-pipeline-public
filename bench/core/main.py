@@ -197,7 +197,13 @@ def main(
 
         elif backend == "onnx":
             from bench.core.runner.onnx_runner import OnnxRunner  # lazy import
-            runner = OnnxRunner(per_dev_cfg["model"]["path"], dev)
+            runner = OnnxRunner(
+                per_dev_cfg["model"]["path"],
+                dev,
+                threads=threads,
+                inter_op_threads=per_dev_cfg.get("run", {}).get("inter_op_threads"),
+                execution_mode=per_dev_cfg.get("run", {}).get("execution_mode"),
+            )
 
         elif backend == "openvino":
             from bench.core.runner.openvino_runner import OpenVinoRunner  # lazy import
@@ -274,6 +280,7 @@ def main(
             hardware=hardware_schema,
             env=env_schema,
             config=cfg,
+            thread_config=measure_results.get("thread_config"),
         )
 
         json_path = write_result(run)

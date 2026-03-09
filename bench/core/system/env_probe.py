@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import platform
 import subprocess
 from typing import Any, Dict, List, Optional
@@ -127,6 +128,14 @@ def collect_env_info(model_path: Optional[str] = None, hardware: Optional[Dict[s
     # ------------------------------------------------------------
     versions["python"] = platform.python_version()
     versions["python_compiler"] = platform.python_compiler()
+
+    # Threading-related environment variables are important for reproducibility.
+    versions["thread_env"] = {
+        "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"),
+        "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS"),
+        "OPENBLAS_NUM_THREADS": os.environ.get("OPENBLAS_NUM_THREADS"),
+        "NUMEXPR_NUM_THREADS": os.environ.get("NUMEXPR_NUM_THREADS"),
+    }
 
     # ------------------------------------------------------------
     # Torch
