@@ -1,1 +1,1 @@
-"# Platz fÅr YAML/CLI-Configs" 
+"""Package marker for benchmark YAML/CLI configuration helpers."""

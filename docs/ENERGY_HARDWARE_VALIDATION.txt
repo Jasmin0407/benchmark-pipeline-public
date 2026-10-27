@@ -1,0 +1,221 @@
+Phase 11 - Hardware plausibility validation with Windows EMI
+============================================================
+
+Purpose
+-------
+Phase 11 now contains both the Windows energy-source validation and the final
+100/500/1000 end-to-end plausibility test.
+
+Validated Dell reference source
+-------------------------------
+Windows EMI has already passed the source-level Dell plausibility check:
+- EMI v2 is present.
+- Primary channel: RAPL_Package0_PKG.
+- Native unit: picowatt-hours.
+- AbsoluteEnergy is monotonic in the performed validation.
+- Mean package power increased from approximately 7.155 W at idle to 47.916 W
+  under four controlled CPU-load workers (about 6.70x).
+- PP0 increased from approximately 1.440 W to 42.198 W.
+
+
+1. Verify Windows EMI before a benchmark session
+------------------------------------------------
+From the repository root:
+
+    python -m bench.tools.windows_emi_probe --interval-s 2
+
+Expected on the reference Dell:
+- available: true
+- primary_domain: RAPL_Package0_PKG
+- positive delta_energy_j
+- positive sensor_duration_s
+
+Optional hardware pytest:
+
+    python -m pytest bench/tests/integration/test_windows_emi_energy_hardware.py -v
+
+2. Run the controlled Phase 11I benchmarks
+------------------------------------------
+The supplied YAML files explicitly pin Windows EMI and the package channel:
+
+    metrics.energy.backend: windows_emi
+    metrics.energy.emi_channel: RAPL_Package0_PKG
+
+Run:
+
+    python -m bench.cli.bench phase11_configs/energy_plausibility_n100.yaml
+    python -m bench.cli.bench phase11_configs/energy_plausibility_n500.yaml
+    python -m bench.cli.bench phase11_configs/energy_plausibility_n1000.yaml
+
+Keep model, input, precision, backend, device, threads, Windows power scheme, AC
+state, Dell thermal mode, placement/cooling and avoidable background load constant.
+
+3. Inspect each bench.json
+--------------------------
+For all three runs require:
+
+    metrics.energy.available == true
+    metrics.energy.backend == "windows_emi"
+    metrics.energy.primary_domain == "RAPL_Package0_PKG"
+    metrics.energy.total_energy_j > 0
+    metrics.energy.inference_count == 100 / 500 / 1000 respectively
+
+For EMI, duration_source should normally be backend_counter. The independent
+wall_clock_duration_s is retained as an audit value.
+
+Real Phase 11I Dell result (27.10.2026)
+-------------------------------------------
+The updated pipeline was executed on the Dell reference system with the supplied
+100/500/1000 configurations. All three results used windows_emi and
+RAPL_Package0_PKG and reported available=true.
+
+    N=100:  3.614921 J total, 36.1492 mJ/inference, 32.6325 W, 0.110777 s
+    N=500: 19.442225 J total, 38.8844 mJ/inference, 48.5633 W, 0.400348 s
+    N=1000: 35.631503 J total, 35.6315 mJ/inference, 45.6709 W, 0.780180 s
+
+Result:
+- E1000 > E500 > E100: PASS
+- E1000/E100 = 9.857 for a 10x workload increase
+- relative spread of normalized energy: about 8.82 %
+- exploratory population CV of normalized energy: about 3.87 %
+- AC power and Windows power scheme remained unchanged within every run
+- all three runs used the same hardware fingerprint
+
+Phase 11 end-to-end plausibility is therefore accepted. The N=100 energy window
+is only about 0.111 s and shows lower mean package power than the longer runs.
+Phase 12 subsequently quantified this start-up/DVFS sensitivity using a fully
+counterbalanced 18-run repeatability series.
+
+4. Analyse the three result files
+---------------------------------
+
+PowerShell (single line):
+
+    python -m bench.tools.energy_plausibility analyze <path-to-n100>\bench.json <path-to-n500>\bench.json <path-to-n1000>\bench.json --output phase11_energy_plausibility_report.json
+
+The strict qualitative expectation is:
+
+    E_1000 > E_500 > E_100
+
+Energy per inference should be reasonably stable under comparable conditions. No
+universal percentage tolerance is hard-coded. If a project-specific tolerance is
+introduced later, its empirical/scientific justification must be documented.
+
+5. Optional pytest gate for produced result files (PowerShell)
+--------------------------------------------------------------
+
+    $env:BENCH_ENERGY_PLAUSIBILITY_RESULTS = "C:\path\n100\bench.json;C:\path\n500\bench.json;C:\path\n1000\bench.json"
+    python -m pytest bench/tests/integration/test_energy_plausibility_hardware.py -v
+
+Optional project-specific threshold:
+
+    $env:BENCH_ENERGY_PLAUSIBILITY_MAX_SPREAD_PCT = "<value>"
+
+Remove the variables afterwards if desired:
+
+    Remove-Item Env:BENCH_ENERGY_PLAUSIBILITY_RESULTS
+    Remove-Item Env:BENCH_ENERGY_PLAUSIBILITY_MAX_SPREAD_PCT -ErrorAction SilentlyContinue
+
+Scientific interpretation
+-------------------------
+A failed 100/500/1000 comparison is not automatically a software defect. Check:
+- very short measurement window / sensor resolution,
+- background processes,
+- DVFS and frequency changes,
+- thermal drift/throttling,
+- different power/performance modes,
+- cooling/temperature state,
+- accidental model/input/batch/thread changes.
+
+Do not add RAPL_Package0_PKG to PP0/PP1/DRAM. The subdomains are diagnostic and
+can overlap with the package domain.
+
+Phase 11 acceptance
+-------------------
+CLOSED on the Dell reference system on 27.10.2026. The real updated pipeline
+produced valid Windows EMI result files for N=100/500/1000, total energy increased
+monotonically, and normalized energy was plausible for this exploratory gate.
+Formal repeatability was subsequently completed in Phase 12.
+
+Phase 12 - Repeatability validation
+==================================
+
+Phase 11 status
+---------------
+Phase 11 is CLOSED on the Dell reference system. The optional pytest hardware
+gate ``test_energy_plausibility_hardware.py`` is intentionally skipped during a
+normal test run unless ``BENCH_ENERGY_PLAUSIBILITY_RESULTS`` is set. A repository
+or CI runner cannot infer which external real-hardware ``bench.json`` files
+belong to the validation series. The skip therefore means "no external hardware
+artifacts were supplied to this optional gate", not "Phase 11 failed".
+
+The gate can be executed explicitly on Windows, for example:
+
+    $env:BENCH_ENERGY_PLAUSIBILITY_RESULTS = "C:\path\n100\bench.json;C:\path\n500\bench.json;C:\path\n1000\bench.json"
+    python -m pytest bench/tests/integration/test_energy_plausibility_hardware.py -v
+
+Phase 12 repeatability – COMPLETE
+---------------------------------
+The Dell repeatability series used six repetitions for each of N=100, N=500 and
+N=1000. All six permutations were executed exactly once, so each workload
+appeared twice in each serial position.
+
+Real results from 2026-10-27:
+- 18/18 runs completed.
+- Phase 12 hardware gate passed.
+- CV of energy_per_inference_j:
+    N=100  : 7.805 %
+    N=500  : 7.877 %
+    N=1000 : 4.307 %
+- The three condition means differ by about 4.10 %.
+- N=100 used an intentionally short mean energy window of about 0.106 s and was
+  correspondingly more sensitive to boost/DVFS/start-state effects.
+
+The detailed report is stored in:
+
+    docs/PHASE12_REPEATABILITY_REPORT_2026-10-27.json
+    docs/PHASE12_REPEATABILITY_VALIDATION_2026-10-27.txt
+
+The generated Phase 12 configs now use:
+
+    output.base_dir = runs/phase12_windows_emi
+
+so future reruns and the analyzer use the same result root.
+
+Phase 13 optional baseline correction – COMPLETE
+-----------------------------------------------
+Three real Dell runs were completed for N=100/500/1000 using the same validated
+windows_emi / RAPL_Package0_PKG domain. The Phase 13 hardware gate passed.
+
+Results:
+
+    N=100:  gross 4.071140 J, adjusted 3.095969 J, 30.9597 mJ/inference,
+            baseline power 9.805612 W, baseline-power CV 11.482 %
+    N=500:  gross 17.337176 J, adjusted 12.632574 J, 25.2651 mJ/inference,
+            baseline power 10.732261 W, baseline-power CV 16.695 %
+    N=1000: gross 35.526034 J, adjusted 27.589576 J, 27.5896 mJ/inference,
+            baseline power 9.265675 W, baseline-power CV 8.807 %
+
+Acceptance:
+- correction_valid=true for all three runs
+- gross total energy monotonic: PASS
+- adjusted total energy monotonic: PASS
+- Phase 13 hardware gate: PASS
+
+Scientific interpretation:
+- adjusted energy/inference relative spread: 20.383 %
+- baseline-power mean relative spread across conditions: 14.763 %
+- gross energy remains the primary scientific result
+- baseline-adjusted energy is retained only as a secondary/exploratory metric
+
+Detailed artifacts:
+
+    docs/PHASE13_BASELINE_REPORT_2026-10-27.json
+    docs/PHASE13_BASELINE_VALIDATION_2026-10-27.txt
+
+Final validation status
+-----------------------
+Phases 11, 12 and 13 are complete on the Dell Windows reference system. Phase 14
+documentation has been updated to the validated final state. No Intel PCM or
+Intel Power Gadget dependency is required for Windows energy measurement.
+

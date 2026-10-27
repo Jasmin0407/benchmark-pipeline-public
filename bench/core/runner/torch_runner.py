@@ -1,4 +1,4 @@
-# C:\Users\freud\Documents\benchmark-pipeline\bench\core\runner\torch_runner.py
+
 """
 TorchRunner – Loads and executes PyTorch models (CPU or CUDA).
 

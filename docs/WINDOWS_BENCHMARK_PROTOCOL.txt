@@ -1,0 +1,119 @@
+Windows Benchmark Protocol
+==========================
+
+Purpose
+-------
+This protocol defines reproducibility conditions for energy-oriented benchmark
+runs on the Dell Windows reference laptop.
+
+Validated energy source
+-----------------------
+Primary backend: windows_emi
+Primary CPU package domain: RAPL_Package0_PKG
+Native counter unit: picowatt-hours
+Normalized unit: joule
+
+Windows EMI has passed an idle-vs-controlled-CPU-load plausibility check on the
+reference Dell and is the validated Windows CPU-package energy path.
+
+Software support
+----------------
+- Optional experiment.context configuration.
+- Read-only Windows power context (active power scheme and AC/battery status).
+- Background CPU-load preflight.
+- CPU-frequency sampling during the preflight window.
+- Manual Dell thermal mode, cooling setup, room temperature, and notes.
+- Temperature remains unavailable until a validated CPU-package source exists.
+- Direct Windows EMI backend using SetupAPI + DeviceIoControl.
+- Exact package-domain selection; no blind domain aggregation.
+
+Recommended operator procedure
+------------------------------
+1. Connect the original/approved AC adapter.
+2. Keep one Windows power scheme unchanged for the comparison series.
+3. Keep one Dell thermal mode unchanged and record it manually.
+4. Keep placement, dock/cooling state, and room conditions as stable as possible.
+5. Close avoidable background applications and allow the system to settle.
+6. Enable experiment.context.preflight for scientific hardware runs.
+7. Inspect experiment_context.preflight before accepting a run.
+8. Do not interpret hardware.max_freq_mhz as measured runtime CPU frequency.
+9. Do not claim CPU-package temperature when experiment_context.thermal.available=false.
+10. Before a Phase-11 series, run:
+
+       python -m bench.tools.windows_emi_probe --interval-s 2
+
+11. Use explicit Windows EMI settings for controlled Phase-11/12 CPU experiments:
+
+       backend: windows_emi
+       emi_channel: RAPL_Package0_PKG
+
+12. Verify the resulting bench.json has available=true, backend=windows_emi and
+    primary_domain=RAPL_Package0_PKG.
+13. If experiment context is enabled, inspect experiment_context.finalization and
+    reject or investigate runs where AC state or the active power scheme changed.
+14. For Phase 12 use the supplied six-round counterbalanced schedule instead of
+    executing 100/500/1000 repeatedly in the same order.
+15. Do not change power scheme, AC state, Dell thermal mode, placement or cooling
+    setup during the 18-run Phase 12 series.
+16. The lack of a validated CPU-package temperature source must be documented as
+    unavailable; do not substitute an unvalidated ACPI/WMI temperature.
+
+Example configuration
+---------------------
+metrics:
+  energy:
+    enabled: true
+    backend: windows_emi
+    emi_channel: RAPL_Package0_PKG
+    min_duration_s: 2.0
+    max_repeats: 10000
+
+experiment:
+  context:
+    enabled: true
+    preflight:
+      enabled: true
+      duration_s: 5.0
+      sample_hz: 2.0
+      max_background_cpu_pct: null
+      max_start_temp_c: null
+      require_ac_power: true
+    manual:
+      dell_thermal_mode: null
+      cooling_setup: "Laptop on desk, no cooling pad"
+      room_temperature_c: null
+      notes: "Reference Windows EMI energy experiment"
+
+Scientific notes
+----------------
+- Null preflight thresholds document observations without inventing pass/fail limits.
+- EMI package energy is gross CPU-package energy during the inference window.
+- PP0, PP1 and DRAM are not added to PKG.
+- For Phase 12, compare only runs with the same backend and primary_domain.
+- Optional baseline correction uses the same RAPL_Package0_PKG domain and
+  comparable system conditions; gross energy must remain available.
+- Phase 13 validation showed the adjusted metric was less stable than gross energy;
+  use gross package energy as the primary scientific metric.
+
+Phase 13 baseline correction – validated
+-----------------------------------------
+When enabled, the method is post_energy_idle: gross energy is measured first, then
+multiple inference-free idle windows are measured through the same Windows EMI
+backend/domain. Gross energy remains the primary result.
+
+Real Dell validation (27.10.2026):
+- N=100/500/1000 completed successfully.
+- correction_valid=true for all three runs.
+- hardware gate passed.
+- adjusted energy/inference relative spread = 20.383 %.
+- baseline-power mean relative spread = 14.763 %.
+
+Operational reporting rule:
+1. Report gross total_energy_j and energy_per_inference_j as primary.
+2. Report baseline-adjusted values only as optional secondary analysis.
+3. Never mix baseline and gross values from different backend/domain/context.
+4. Do not claim a baseline-adjusted value is inherently more accurate.
+
+Final validation references:
+- docs/ENERGY_VALIDATION_SUMMARY_2026-10-27.txt
+- docs/PHASE13_BASELINE_VALIDATION_2026-10-27.txt

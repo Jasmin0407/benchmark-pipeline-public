@@ -127,8 +127,31 @@ def _resolve_run_name(run: RunSchema) -> str:
 
 
 def _write_json(out_path: Path, run: RunSchema) -> None:
-    """Write the full run object as JSON."""
+    """Write the full run object as JSON while preserving legacy output shape.
+
+    ``energy`` is an opt-in metric. When no energy measurement was requested,
+    omit the field entirely instead of serializing ``"energy": null``. This
+    keeps persisted results from legacy or explicitly disabled configurations
+    structurally compatible with pre-energy benchmark output.
+    """
     payload: Dict[str, Any] = run.model_dump() if hasattr(run, "model_dump") else dict(run)
+    metrics = payload.get("metrics")
+    if isinstance(metrics, dict):
+        energy = metrics.get("energy")
+        if energy is None:
+            metrics.pop("energy", None)
+        elif isinstance(energy, dict):
+            # Keep the opt-in energy block compact and aligned with the public
+            # result examples: unavailable/unsupported hardware should persist
+            # only meaningful fields rather than a collection of null values.
+            metrics["energy"] = {
+                key: value for key, value in energy.items() if value is not None
+            }
+
+    experiment_context = payload.get("experiment_context")
+    if experiment_context is None:
+        payload.pop("experiment_context", None)
+
     with out_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 

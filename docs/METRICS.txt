@@ -267,3 +267,125 @@ To compare results across devices/backends, keep the following aligned:
 - Same warm-up policy and iteration count (if applicable)
 - Same window configuration (pre_roll_s, post_delay_s, sampler_hz/cpu_hz)
 - Same software stack versions (env block: python, runtime, drivers)
+
+
+9) Energy Measurement
+=====================
+
+Scope
+-----
+Energy is measured in a dedicated inference window after the timing and CPU/memory
+measurements. Energy-pass inferences are not latency samples.
+
+Core fields
+-----------
+metrics.energy.available
+  Whether the configured hardware energy source was usable.
+
+metrics.energy.backend
+  Selected backend, for example windows_emi, rapl, nvml, or jetson_ina3221.
+
+metrics.energy.primary_domain
+  Primary energy domain used for the reported total. On the validated Dell Windows
+  CPU reference system this is RAPL_Package0_PKG.
+
+metrics.energy.total_energy_j
+  Difference between cumulative end and start counters in joules.
+
+metrics.energy.energy_per_inference_j
+  total_energy_j / inference_count.
+
+metrics.energy.energy_per_sample_j
+  energy_per_inference_j / batch_size.
+
+metrics.energy.average_power_w
+  total_energy_j / duration_s.
+
+metrics.energy.duration_s
+  Energy-window duration used for average_power_w. Windows EMI prefers the delta of
+  EMI AbsoluteTime, because that timestamp is paired with the energy counter.
+
+metrics.energy.duration_source
+  backend_counter when a validated backend-native timestamp is used; otherwise
+  wall_clock.
+
+metrics.energy.wall_clock_duration_s
+  Independent monotonic wall-clock audit duration around the energy reads and
+  inference loop.
+
+metrics.energy.domains
+  Optional diagnostic domain data. Package and subdomains must not be blindly
+  summed. On Windows EMI, RAPL_Package0_PP0, PP1 and DRAM are diagnostic domains;
+  RAPL_Package0_PKG remains the primary package result for the Dell CPU benchmark.
+
+Windows EMI conversion
+----------------------
+EMI AbsoluteEnergy with EmiMeasurementUnitPicowattHours is cumulative. The backend
+normalizes it using:
+
+  1 pWh = 3.6e-9 J
+
+Only the delta between start and end is interpreted as energy consumed during the
+controlled inference window. The absolute zero point has no benchmark meaning.
+
+Unavailable hardware
+--------------------
+If no supported energy backend/domain is available, the energy block reports
+available=false and a reason. The benchmark itself must not fail for that condition.
+
+
+
+Phase 13 optional baseline-correction fields
+--------------------------------------------
+These fields appear only when metrics.energy.baseline_correction.enabled=true.
+
+metrics.energy.gross_energy_j
+  Alias of total_energy_j. It is persisted explicitly when baseline correction
+  is enabled to make clear that the original gross measurement remains primary.
+
+metrics.energy.baseline_adjusted_energy_j
+  Optional diagnostic:
+    gross_energy_j - mean_idle_power_w * gross_duration_s
+
+metrics.energy.baseline_adjusted_energy_per_inference_j
+  baseline_adjusted_energy_j / inference_count.
+
+metrics.energy.baseline_adjusted_energy_per_sample_j
+  baseline_adjusted_energy_per_inference_j / batch_size.
+
+metrics.energy.baseline_adjusted_energy_per_signal_s_j
+  Optional corrected sample energy divided by represented signal duration.
+
+metrics.energy.baseline_correction
+  Audit block containing:
+  - method = post_energy_idle
+  - backend
+  - primary_domain
+  - requested_window_duration_s
+  - repetitions
+  - individual idle samples
+  - baseline_power_w summary (mean, sample SD, CV, median, min, max)
+  - estimated_idle_energy_j
+  - baseline_fraction_of_gross_pct
+  - correction_valid
+  - notes
+
+The baseline is measured after the gross energy pass. It therefore cannot alter
+the already completed gross energy window. A negative adjusted estimate is not
+clamped to zero; correction_valid=false identifies such a noise-dominated case.
+
+Gross energy remains the primary value for cross-platform/model comparisons.
+Baseline-adjusted values should be reported only as an explicitly identified
+secondary analysis.
+
+Phase 13 real-hardware interpretation (Dell Windows reference system)
+---------------------------------------------------------------------
+The post_energy_idle correction passed the real hardware gate for N=100/500/1000
+and all corrections were valid. However, baseline-adjusted energy per inference
+had a 20.383 % relative spread across the three workloads, while the estimated
+mean idle package power itself varied by 14.763 % across conditions. Therefore:
+
+- total_energy_j / energy_per_inference_j remain the primary scientific metrics;
+- baseline-adjusted fields are secondary/exploratory diagnostics;
+- do not describe baseline-adjusted energy as intrinsically more accurate;
+- always report backend, primary_domain and experiment context with energy values.

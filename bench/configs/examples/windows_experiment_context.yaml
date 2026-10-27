@@ -1,0 +1,16 @@
+# Add this block to an existing benchmark configuration.
+experiment:
+  context:
+    enabled: true
+    preflight:
+      enabled: true
+      duration_s: 5.0
+      sample_hz: 2.0
+      max_background_cpu_pct: null
+      max_start_temp_c: null
+      require_ac_power: true
+    manual:
+      dell_thermal_mode: "Ultra Performance"
+      cooling_setup: "Laptop on desk, no cooling pad"
+      room_temperature_c: 22.0
+      notes: "Reference Windows benchmark"

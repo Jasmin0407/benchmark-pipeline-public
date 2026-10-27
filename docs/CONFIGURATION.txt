@@ -157,3 +157,115 @@ Validation Guarantees
 	• Missing optional fields receive documented defaults.
 	• Structural regressions are caught by golden tests.
 	• Numeric values are intentionally not golden-tested.
+
+
+Energy Measurement
+==================
+
+Energy measurement is opt-in. Existing configurations without metrics.energy keep
+legacy behavior and do not execute extra energy inferences.
+
+Minimal configuration:
+
+metrics:
+  energy:
+    enabled: true
+    min_duration_s: 2.0
+    max_repeats: 10000
+
+Optional backend selection:
+
+metrics:
+  energy:
+    enabled: true
+    backend: windows_emi
+    emi_channel: RAPL_Package0_PKG
+    min_duration_s: 2.0
+    max_repeats: 10000
+
+Supported backend values:
+- auto
+- windows_emi (alias: emi)
+- rapl
+- nvml
+- jetson_ina3221 (alias: jetson)
+
+Auto-selection rules relevant to the current implementation:
+- Windows CPU target -> Windows EMI
+- Linux CPU target -> Jetson candidate first, then Intel RAPL
+- GPU target -> Jetson candidate on Linux, then NVML
+- generic Windows NPU target -> no CPU-package fallback is claimed as NPU energy
+
+Windows EMI:
+- Default channel when selected: RAPL_Package0_PKG
+- Native EMI unit accepted by the backend: picowatt-hours
+- Internal/public energy unit: joule
+- Phase 11 configurations pin both backend and channel explicitly so experimental
+  comparisons cannot silently change measurement source.
+
+The Windows EMI backend is read-only. It does not change the Windows power scheme,
+Dell thermal mode, clocks, or fan policy.
+
+Optional baseline correction (Phase 13 validated)
+------------------------------------------------
+Baseline correction remains disabled unless explicitly requested:
+
+metrics:
+  energy:
+    enabled: true
+    backend: windows_emi
+    emi_channel: RAPL_Package0_PKG
+    min_duration_s: 2.0
+    max_repeats: 10000
+    baseline_correction:
+      enabled: true
+      method: post_energy_idle
+      duration_s: 2.0
+      repetitions: 5
+
+Rules:
+- baseline_correction requires energy.enabled=true.
+- method is currently restricted to post_energy_idle.
+- duration_s must be > 0.
+- repetitions must be an integer >= 1.
+- Gross energy is measured first and is never replaced by the correction.
+- Idle baseline windows are measured after the gross Energy pass so Timing,
+  CPU/RAM, and gross energy remain untouched.
+- The same EnergyMeter backend/domain is used for gross and baseline windows.
+- On the validated Dell Windows CPU system this means RAPL_Package0_PKG.
+- A negative corrected value is preserved for diagnostics and marked invalid;
+  it is not silently clamped to zero.
+
+Validation result on the Dell reference system (27.10.2026):
+- the correction was technically valid for N=100/500/1000,
+- correction_valid=true for all three runs,
+- baseline-adjusted energy per inference was less stable than gross energy
+  (20.383 % relative spread across the three workloads),
+- therefore baseline correction remains optional and secondary; gross energy
+  remains the primary scientific result.
+
+Experiment Context
+==================
+
+For scientific Windows hardware runs, enable the optional preflight context:
+
+experiment:
+  context:
+    enabled: true
+    preflight:
+      enabled: true
+      duration_s: 5.0
+      sample_hz: 2.0
+      max_background_cpu_pct: null
+      max_start_temp_c: null
+      require_ac_power: true
+    manual:
+      dell_thermal_mode: null
+      cooling_setup: "Laptop on desk, no cooling pad"
+      room_temperature_c: null
+      notes: null
+
+A null threshold documents the value without inventing an automatic pass/fail limit.
+Unavailable temperature/throttling data must remain unavailable rather than being
+replaced by an unvalidated ACPI/WMI sensor.
+

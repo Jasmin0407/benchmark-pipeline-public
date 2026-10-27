@@ -27,6 +27,10 @@ from typing import Any, Dict, Optional, List, Tuple
 from pydantic import ValidationError
 
 from bench.core.config.config_loader import load_config
+from bench.core.context.experiment_context import (
+    collect_experiment_context,
+    finalize_experiment_context,
+)
 from bench.core.io.result_writer import write_result
 from bench.core.measure.measure_controller import MeasureController
 from bench.core.metrics.macs_meter import MacsMeter
@@ -176,7 +180,7 @@ def main(
     targets = _ensure_list_targets(cfg["device"]["target"])
     threads = int(cfg.get("run", {}).get("threads", 1))
 
-    results_per_device: List[Tuple[str, Dict[str, Any]]] = []
+    results_per_device: List[Tuple[str, Dict[str, Any], Optional[Dict[str, Any]]]] = []
 
     # ------------------------------------------------------------------
     # Per-device execution loop
@@ -185,6 +189,7 @@ def main(
         logger.info("Running benchmark for device=%s backend=%s", dev, backend)
 
         per_dev_cfg = _patch_cfg_for_device(cfg, dev)
+        experiment_context = collect_experiment_context(per_dev_cfg)
         controller = MeasureController(per_dev_cfg)
 
         # Runner selection
@@ -226,7 +231,11 @@ def main(
         try:
             runner.load()
             measure_results = controller.run_benchmark(runner)
-            results_per_device.append((dev, measure_results))
+            experiment_context = finalize_experiment_context(
+                per_dev_cfg,
+                experiment_context,
+            )
+            results_per_device.append((dev, measure_results, experiment_context))
         finally:
             runner.teardown()
 
@@ -247,7 +256,7 @@ def main(
     # ------------------------------------------------------------------
     written: List[Tuple[str, str]] = []
 
-    for dev, measure_results in results_per_device:
+    for dev, measure_results, experiment_context in results_per_device:
         mem = measure_results.get("memory")
 
         # Prefer runtime-derived input facts to avoid drifting away from what was actually benchmarked.
@@ -276,11 +285,13 @@ def main(
                 cpu_utilization_pct=measure_results.get("cpu_utilization_pct"),
                 memory=mem,
                 ms_per_signal_s=ms_per_signal_s,
+                energy=(measure_results.get("metrics") or {}).get("energy"),
             ),
             hardware=hardware_schema,
             env=env_schema,
             config=cfg,
             thread_config=measure_results.get("thread_config"),
+            experiment_context=experiment_context,
         )
 
         json_path = write_result(run)

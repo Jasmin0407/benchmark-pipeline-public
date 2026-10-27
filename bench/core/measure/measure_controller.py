@@ -20,6 +20,10 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from bench.core.metrics.cpu_meter import CpuMeter
+from bench.core.metrics.energy_backend_factory import create_energy_backend
+from bench.core.metrics.energy_baseline import measure_and_apply_idle_baseline
+from bench.core.metrics.energy_meter import EnergyMeter
+from bench.core.metrics.energy_window import determine_energy_repeats
 from bench.core.metrics.gpu_meter_jetson import JetsonGpuMeter
 from bench.core.metrics.memory_meter import MemoryMeter
 from bench.core.metrics.timing_meter import TimingMeter
@@ -80,6 +84,32 @@ class MeasureController:
 
         gpu_hz_cfg = _deep_get(cfg, ["metrics", "gpu_sampler_hz"], min(self.sample_hz, 10))
         self.gpu_meter = JetsonGpuMeter(sample_hz=int(gpu_hz_cfg))
+
+        self.energy_enabled = bool(
+            _deep_get(cfg, ["metrics", "energy", "enabled"], False)
+        )
+        self.energy_min_duration_s = float(
+            _deep_get(cfg, ["metrics", "energy", "min_duration_s"], 2.0)
+        )
+        self.energy_max_repeats = int(
+            _deep_get(cfg, ["metrics", "energy", "max_repeats"], 10000)
+        )
+        baseline_cfg = _deep_get(
+            cfg,
+            ["metrics", "energy", "baseline_correction"],
+            {},
+        ) or {}
+        self.energy_baseline_enabled = bool(baseline_cfg.get("enabled", False))
+        self.energy_baseline_duration_s = float(baseline_cfg.get("duration_s", 2.0))
+        self.energy_baseline_repetitions = int(baseline_cfg.get("repetitions", 3))
+        # Creating backend objects is side-effect free. Hardware probing is
+        # deferred until EnergyMeter.measure(), which is called only after all
+        # existing timing/CPU/memory measurements have completed.
+        self.energy_meter = (
+            EnergyMeter(backend=create_energy_backend(cfg))
+            if self.energy_enabled
+            else None
+        )
 
     def _resolve_duration_fields(self, mem_result: Dict[str, Any]) -> Dict[str, Any]:
         timestamps = mem_result.get("timestamps_s") or []
@@ -406,7 +436,71 @@ class MeasureController:
         }
 
         gpu_util = gpu_block.get("gpu_utilization_pct") if isinstance(gpu_block, dict) else None
+
+        # Energy is intentionally measured last. The dedicated inference loop
+        # must not contribute timing samples or influence CPU/memory metrics.
+        energy_result = None
+        if self.energy_enabled:
+            energy_repeats = determine_energy_repeats(
+                mean_inference_ms=mean_ms,
+                min_duration_s=self.energy_min_duration_s,
+                run_repeats=self.repeats,
+                max_repeats=self.energy_max_repeats,
+            )
+            assert self.energy_meter is not None
+            energy_result = self.energy_meter.measure(
+                fn=_measure_once,
+                repeats=energy_repeats,
+                batch_size=batch_size,
+                signal_duration_s=input_duration_s,
+            )
+
+            if self.energy_baseline_enabled:
+                baseline_result = measure_and_apply_idle_baseline(
+                    self.energy_meter,
+                    energy_result,
+                    duration_s=self.energy_baseline_duration_s,
+                    repetitions=self.energy_baseline_repetitions,
+                    batch_size=batch_size,
+                    signal_duration_s=input_duration_s,
+                )
+                energy_result["baseline_correction"] = baseline_result
+
+                if energy_result.get("available") is True:
+                    energy_result["gross_energy_j"] = energy_result.get("total_energy_j")
+                if baseline_result.get("available") is True:
+                    energy_result["baseline_adjusted_energy_j"] = baseline_result.get(
+                        "baseline_adjusted_energy_j"
+                    )
+                    energy_result[
+                        "baseline_adjusted_energy_per_inference_j"
+                    ] = baseline_result.get(
+                        "baseline_adjusted_energy_per_inference_j"
+                    )
+                    energy_result[
+                        "baseline_adjusted_energy_per_sample_j"
+                    ] = baseline_result.get(
+                        "baseline_adjusted_energy_per_sample_j"
+                    )
+                    if "baseline_adjusted_energy_per_signal_s_j" in baseline_result:
+                        energy_result[
+                            "baseline_adjusted_energy_per_signal_s_j"
+                        ] = baseline_result[
+                            "baseline_adjusted_energy_per_signal_s_j"
+                        ]
+
         thread_config = self._build_thread_config(runner)
+
+        metrics_block = {
+            "inference_time_ms": stats,
+            "ms_per_signal_s": ms_per_signal_s,
+            "throughput_sps": throughput_sps,
+            "cpu_utilization_pct": cpu_result,
+            "gpu_utilization_pct": gpu_util,
+            "memory": memory_block,
+        }
+        if self.energy_enabled:
+            metrics_block["energy"] = energy_result
 
         return {
             "actual_input_shape": actual_input_shape,
@@ -422,12 +516,5 @@ class MeasureController:
             "jetson_gpu": gpu_block,
             "memory": memory_block,
             "thread_config": thread_config,
-            "metrics": {
-                "inference_time_ms": stats,
-                "ms_per_signal_s": ms_per_signal_s,
-                "throughput_sps": throughput_sps,
-                "cpu_utilization_pct": cpu_result,
-                "gpu_utilization_pct": gpu_util,
-                "memory": memory_block,
-            },
+            "metrics": metrics_block,
         }

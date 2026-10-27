@@ -71,6 +71,58 @@ class ThreadConfigSchema(BaseModel):
     note: Optional[str] = None
 
 
+class EnergySchema(BaseModel):
+    """Persisted energy metrics for a dedicated inference window."""
+
+    model_config = ConfigDict(extra="allow")
+
+    available: bool
+    backend: Optional[str] = None
+    measurement_scope: Optional[str] = None
+    reason: Optional[str] = None
+
+    duration_s: Optional[float] = Field(default=None, gt=0)
+    duration_source: Optional[str] = None
+    wall_clock_duration_s: Optional[float] = Field(default=None, gt=0)
+    inference_count: Optional[int] = Field(default=None, ge=1)
+    total_energy_j: Optional[float] = Field(default=None, ge=0)
+    energy_per_inference_j: Optional[float] = Field(default=None, ge=0)
+    energy_per_sample_j: Optional[float] = Field(default=None, ge=0)
+    average_power_w: Optional[float] = Field(default=None, ge=0)
+    energy_per_signal_s_j: Optional[float] = Field(default=None, ge=0)
+
+    # Phase 13 optional baseline correction. Gross energy remains identical to
+    # total_energy_j; corrected values are additive and never replace it.
+    gross_energy_j: Optional[float] = Field(default=None, ge=0)
+    baseline_adjusted_energy_j: Optional[float] = None
+    baseline_adjusted_energy_per_inference_j: Optional[float] = None
+    baseline_adjusted_energy_per_sample_j: Optional[float] = None
+    baseline_adjusted_energy_per_signal_s_j: Optional[float] = None
+    baseline_correction: Optional[Dict[str, Any]] = None
+
+    primary_domain: Optional[str] = None
+    domains: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+
+
+class ExperimentContextSchema(BaseModel):
+    """Persisted audit context for reproducible hardware benchmarks."""
+
+    model_config = ConfigDict(extra="allow")
+
+    platform: Optional[str] = None
+    power: Optional[Dict[str, Any]] = None
+    power_end: Optional[Dict[str, Any]] = None
+    finalization: Optional[Dict[str, Any]] = None
+    cpu_frequency: Optional[Dict[str, Any]] = None
+    thermal: Optional[Dict[str, Any]] = None
+    background: Optional[Dict[str, Any]] = None
+    manual: Optional[Dict[str, Any]] = None
+    preflight: Optional[Dict[str, Any]] = None
+
+
 class MetricsSchema(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -80,6 +132,7 @@ class MetricsSchema(BaseModel):
     cpu_utilization_pct: Optional[Dict[str, Any]] = None
     memory: Optional[MemorySchema] = None
     ms_per_signal_s: Optional[float] = None
+    energy: Optional[EnergySchema] = None
 
 
 class RunSchema(BaseModel):
@@ -93,3 +146,4 @@ class RunSchema(BaseModel):
     hardware: Optional[HardwareSchema] = None
     env: Optional[EnvSchema] = None
     thread_config: Optional[ThreadConfigSchema] = None
+    experiment_context: Optional[ExperimentContextSchema] = None

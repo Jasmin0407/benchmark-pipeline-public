@@ -96,3 +96,29 @@ Skipped tests:
 	• Maintain one config per benchmark scenario.
 	• Re-run benchmarks after reboot for validation.
 	• Archive runs/ directories for long-term comparison.
+
+
+9. Energy Benchmarking (Windows Reference)
+------------------------------------------
+Validated Windows CPU backend:
+  windows_emi / RAPL_Package0_PKG
+
+Recommended scientific configuration:
+  - AC power connected
+  - fixed Windows power scheme during a comparison series
+  - experiment.context enabled with preflight
+  - stable cooling/placement conditions
+  - explicit backend/domain for controlled studies
+
+Primary energy outputs:
+  - total_energy_j
+  - energy_per_inference_j
+  - energy_per_sample_j
+  - average_power_w
+
+Baseline correction is optional and secondary. The Dell Phase 13 validation found
+that the adjusted metric was less stable than gross energy, so gross energy remains
+the primary cross-model/cross-platform result.
+
+Hardware-gated pytest tests intentionally skip when no external real-hardware
+result files/root are supplied through their documented environment variables.
